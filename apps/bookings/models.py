@@ -8,6 +8,7 @@ from django.db.models import F, Q
 from django.utils import timezone
 from django.utils.text import slugify
 from django.utils.translation import gettext_lazy as _
+from phonenumber_field.modelfields import PhoneNumberField
 
 
 WEEKDAY_KEYS = (
@@ -19,6 +20,7 @@ WEEKDAY_KEYS = (
     "sat",
     "sun",
 )
+MAX_CONVERSATION_MESSAGES = 15
 
 
 class TimeStampedModel(models.Model):
@@ -30,22 +32,8 @@ class TimeStampedModel(models.Model):
 
 
 class Business(TimeStampedModel):
-    class Mode(models.TextChoices):
-        ALTEGIO = "ALTEGIO", _("Altegio / YClients")
-        STANDALONE = "STANDALONE", _("Standalone")
-
     name = models.CharField(max_length=255)
     slug = models.SlugField(max_length=255, unique=True, blank=True)
-    mode = models.CharField(
-        max_length=20,
-        choices=Mode.choices,
-        default=Mode.STANDALONE,
-    )
-    api_config = models.JSONField(
-        default=dict,
-        blank=True,
-        help_text=_("CRM credentials and sync configuration."),
-    )
     ai_settings = models.JSONField(
         default=dict,
         blank=True,
@@ -57,7 +45,7 @@ class Business(TimeStampedModel):
         blank=True,
         help_text=_("Business-specific context for the AI assistant."),
     )
-    timezone_name = models.CharField(max_length=64, default="UTC")
+    timezone_name = models.CharField(max_length=64, default="Asia/Almaty")
     is_active = models.BooleanField(default=True)
 
     class Meta:
@@ -68,30 +56,11 @@ class Business(TimeStampedModel):
     def __str__(self):
         return self.name
 
-    def clean(self):
-        super().clean()
-        if self.mode == self.Mode.ALTEGIO and not self.api_config:
-            raise ValidationError(
-                {
-                    "api_config": _(
-                        "API configuration is required in ALTEGIO mode."
-                    )
-                }
-            )
-
     def save(self, *args, **kwargs):
         if not self.slug:
             self.slug = slugify(self.name, allow_unicode=True)
         self.full_clean()
         return super().save(*args, **kwargs)
-
-    @property
-    def is_integration_mode(self):
-        return self.mode == self.Mode.ALTEGIO
-
-    @property
-    def is_standalone_mode(self):
-        return self.mode == self.Mode.STANDALONE
 
     def get_ai_setting(self, key, default=None):
         return self.ai_settings.get(key, default)
@@ -150,6 +119,7 @@ class Service(TimeStampedModel):
         validators=[MinValueValidator(Decimal("0.00"))],
     )
     duration = models.DurationField()
+    buffer_time = models.DurationField(default=timedelta())
     is_active = models.BooleanField(default=True)
 
     class Meta:
@@ -162,8 +132,12 @@ class Service(TimeStampedModel):
                 name="uniq_service_name_per_business",
             ),
             models.CheckConstraint(
-                check=Q(duration__gt=timedelta()),
+                condition=Q(duration__gt=timedelta()),
                 name="service_duration_positive",
+            ),
+            models.CheckConstraint(
+                condition=Q(buffer_time__gte=timedelta()),
+                name="service_buffer_time_non_negative",
             ),
         ]
 
@@ -187,6 +161,8 @@ class Booking(TimeStampedModel):
         CONFIRMED = "confirmed", _("Confirmed")
         PENDING = "pending", _("Pending")
         CANCELLED = "cancelled", _("Cancelled")
+        NO_SHOW = "no_show", _("No show")
+        NEEDS_ATTENTION = "needs_attention", _("Needs attention")
 
     business = models.ForeignKey(
         Business,
@@ -203,14 +179,31 @@ class Booking(TimeStampedModel):
         on_delete=models.PROTECT,
         related_name="bookings",
     )
+    client = models.ForeignKey(
+        "Client",
+        on_delete=models.PROTECT,
+        related_name="bookings",
+    )
+    service_duration = models.DurationField(
+        null=True,
+        blank=True,
+        editable=False,
+    )
+    service_buffer_time = models.DurationField(
+        null=True,
+        blank=True,
+        editable=False,
+    )
     client_data = models.JSONField(default=dict, blank=True)
     start_time = models.DateTimeField()
     end_time = models.DateTimeField(blank=True)
     status = models.CharField(
-        max_length=10,
+        max_length=20,
         choices=Status.choices,
         default=Status.PENDING,
     )
+    follow_up_sent_at = models.DateTimeField(null=True, blank=True)
+    reminder_sent_at = models.DateTimeField(null=True, blank=True)
     notes = models.TextField(blank=True)
 
     objects = BookingQuerySet.as_manager()
@@ -225,7 +218,7 @@ class Booking(TimeStampedModel):
         ]
         constraints = [
             models.CheckConstraint(
-                check=Q(end_time__gt=F("start_time")),
+                condition=Q(end_time__gt=F("start_time")),
                 name="booking_end_after_start",
             ),
         ]
@@ -239,6 +232,7 @@ class Booking(TimeStampedModel):
     def clean(self):
         super().clean()
         self.sync_business_relations()
+        self.sync_service_duration()
         self.calculate_end_time()
 
         if not self.start_time:
@@ -260,14 +254,42 @@ class Booking(TimeStampedModel):
             )
 
     def save(self, *args, **kwargs):
+        self.sync_service_duration()
         self.calculate_end_time()
         self.full_clean()
-        return super().save(*args, **kwargs)
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None:
+            kwargs["update_fields"] = set(update_fields) | {
+                "business",
+                "service_duration",
+                "service_buffer_time",
+                "end_time",
+            }
+        saved_instance = super().save(*args, **kwargs)
+        self._original_service_id = self.service_id
+        return saved_instance
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._original_service_id = self.service_id
 
     def calculate_end_time(self):
-        if self.start_time and self.service_id:
-            self.end_time = self.start_time + self.service.duration
+        if self.start_time and self.service_duration is not None:
+            self.end_time = self.start_time + self.total_slot_duration
         return self.end_time
+
+    def sync_service_duration(self):
+        should_refresh_snapshot = any(
+            [
+                self.service_id and self.service_duration is None,
+                self.service_id and self.service_buffer_time is None,
+                self.service_id and not self.pk,
+                self.service_id and self.service_id != self._original_service_id,
+            ]
+        )
+        if should_refresh_snapshot:
+            self.service_duration = self.service.duration
+            self.service_buffer_time = self.service.buffer_time
 
     def sync_business_relations(self):
         if self.master_id and self.business_id != self.master.business_id:
@@ -283,6 +305,10 @@ class Booking(TimeStampedModel):
                 raise ValidationError(
                     _("Master and service must belong to the same business.")
                 )
+        if self.client_id and self.business_id != self.client.business_id:
+            raise ValidationError(
+                {"client": _("Client must belong to the same business.")}
+            )
 
     def has_overlap(self):
         if self.status == self.Status.CANCELLED:
@@ -299,8 +325,112 @@ class Booking(TimeStampedModel):
             .exists()
         )
 
+    @property
+    def total_slot_duration(self):
+        return (
+            (self.service_duration or timedelta())
+            + (self.service_buffer_time or timedelta())
+        )
+
+    @property
+    def work_end_time(self):
+        if not self.start_time or self.service_duration is None:
+            return None
+        return self.start_time + self.service_duration
+
     @staticmethod
     def make_aware_datetime(target_date: date, target_time: time):
         value = datetime.combine(target_date, target_time)
         return timezone.make_aware(value, timezone.get_current_timezone())
 
+
+class Client(TimeStampedModel):
+    business = models.ForeignKey(
+        Business,
+        on_delete=models.CASCADE,
+        related_name="clients",
+    )
+    name = models.CharField(max_length=100, blank=True)
+    phone = PhoneNumberField(region="KZ")
+    external_id = models.CharField(max_length=100, blank=True)
+    telegram_id = models.CharField(max_length=50, blank=True, null=True)
+    whatsapp_id = models.CharField(max_length=50, blank=True, null=True)
+    ai_failure_count = models.PositiveSmallIntegerField(default=0)
+    allow_follow_up = models.BooleanField(default=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ("name", "phone")
+        verbose_name = _("client")
+        verbose_name_plural = _("clients")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("business", "phone"),
+                name="uniq_client_phone_per_business",
+            ),
+        ]
+
+    def __str__(self):
+        return self.name or str(self.phone)
+
+
+class ConversationMessage(TimeStampedModel):
+    class Channel(models.TextChoices):
+        TELEGRAM = "telegram", _("Telegram")
+        WHATSAPP = "whatsapp", _("WhatsApp")
+
+    class Role(models.TextChoices):
+        SYSTEM = "system", _("System")
+        USER = "user", _("User")
+        ASSISTANT = "assistant", _("Assistant")
+        TOOL = "tool", _("Tool")
+
+    business = models.ForeignKey(
+        Business,
+        on_delete=models.CASCADE,
+        related_name="conversation_messages",
+    )
+    client = models.ForeignKey(
+        Client,
+        on_delete=models.CASCADE,
+        related_name="conversation_messages",
+    )
+    channel = models.CharField(max_length=20, choices=Channel.choices)
+    role = models.CharField(max_length=20, choices=Role.choices)
+    content = models.TextField()
+
+    class Meta:
+        ordering = ("created_at", "id")
+        verbose_name = _("conversation message")
+        verbose_name_plural = _("conversation messages")
+        indexes = [
+            models.Index(fields=("business", "client", "channel", "created_at")),
+        ]
+
+    def clean(self):
+        super().clean()
+        if self.client_id and self.business_id != self.client.business_id:
+            raise ValidationError(
+                {"client": _("Client must belong to the same business.")}
+            )
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        saved_instance = super().save(*args, **kwargs)
+        self.prune_history()
+        return saved_instance
+
+    def prune_history(self):
+        stale_message_ids = list(
+            ConversationMessage.objects.filter(
+                business_id=self.business_id,
+                client_id=self.client_id,
+                channel=self.channel,
+            )
+            .order_by("-created_at", "-id")
+            .values_list("id", flat=True)[MAX_CONVERSATION_MESSAGES:]
+        )
+        if stale_message_ids:
+            ConversationMessage.objects.filter(
+                id__in=stale_message_ids
+            ).delete()

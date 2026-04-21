@@ -5,7 +5,7 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
 
-from .models import Booking, Business
+from .models import Booking, Business, Client
 
 
 DEFAULT_SLOT_STEP = timedelta(minutes=30)
@@ -77,13 +77,14 @@ def slot_overlaps(slot: TimeSlot, bookings):
 
 
 def get_available_slots(
+    business_id: int,
     *,
-    business: Business,
     target_date: date,
     service_id: int,
     master_id: int | None = None,
     slot_step: timedelta = DEFAULT_SLOT_STEP,
 ):
+    business = Business.objects.get(pk=business_id, is_active=True)
     service = business.services.get(pk=service_id, is_active=True)
     masters = business.masters.filter(is_active=True)
     if master_id is not None:
@@ -96,6 +97,7 @@ def get_available_slots(
         bookings = list(
             Booking.objects.active()
             .filter(
+                business=business,
                 master=master,
                 start_time__lt=day_end,
                 end_time__gt=day_start,
@@ -105,7 +107,7 @@ def get_available_slots(
         for slot in iter_master_slots(
             master=master,
             target_date=target_date,
-            duration=service.duration,
+            duration=service.duration + service.buffer_time,
             slot_step=slot_step,
         ):
             if not slot_overlaps(slot, bookings):
@@ -119,10 +121,11 @@ def get_available_slots(
 
 @transaction.atomic
 def create_appointment(
+    business_id: int,
     *,
-    business: Business,
     master_id: int,
     service_id: int,
+    client_id: int,
     start_time: datetime,
     client_data: dict,
     status: str = Booking.Status.PENDING,
@@ -132,16 +135,36 @@ def create_appointment(
             "start_time must include timezone information."
         )
 
+    business = Business.objects.get(pk=business_id, is_active=True)
     master = business.masters.select_for_update().get(
         pk=master_id,
         is_active=True,
     )
     service = business.services.get(pk=service_id, is_active=True)
+    client = business.clients.get(pk=client_id, is_active=True)
+    provisional_end_time = start_time + service.duration + service.buffer_time
+
+    conflicting_booking = (
+        Booking.objects.active()
+        .select_for_update()
+        .filter(
+            business=business,
+            master=master,
+            start_time__lt=provisional_end_time,
+            end_time__gt=start_time,
+        )
+        .first()
+    )
+    if conflicting_booking is not None:
+        raise ValidationError(
+            "This time slot was just booked. Please choose another slot."
+        )
 
     booking = Booking(
         business=business,
         master=master,
         service=service,
+        client=client,
         start_time=start_time,
         status=status,
         client_data=client_data,
@@ -155,13 +178,21 @@ OPENAI_FUNCTION_DEFINITIONS = [
     {
         "type": "function",
         "function": {
-            "name": "get_available_slots",
+            "name": "get_free_slots",
             "description": (
-                "Return free booking slots for a given date and service."
+                "Используй эту функцию, когда клиент выразил желание "
+                "записаться или спросил 'Когда есть свободное время?'. "
+                "Тебе нужно передать ID услуги и желаемую дату. Если дата "
+                "не указана, используй текущую дату. Получив список слотов, "
+                "предложи клиенту 3 самых удобных варианта: утро, обед, вечер."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "business_id": {
+                        "type": "integer",
+                        "description": "Business identifier.",
+                    },
                     "date": {
                         "type": "string",
                         "description": (
@@ -177,7 +208,7 @@ OPENAI_FUNCTION_DEFINITIONS = [
                         "description": "Optional preferred master identifier.",
                     },
                 },
-                "required": ["date", "service_id"],
+                "required": ["date", "service_id", "business_id"],
                 "additionalProperties": False,
             },
         },
@@ -192,6 +223,10 @@ OPENAI_FUNCTION_DEFINITIONS = [
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "business_id": {
+                        "type": "integer",
+                        "description": "Business identifier.",
+                    },
                     "master_id": {
                         "type": "integer",
                         "description": "Selected master identifier.",
@@ -199,6 +234,10 @@ OPENAI_FUNCTION_DEFINITIONS = [
                     "service_id": {
                         "type": "integer",
                         "description": "Selected service identifier.",
+                    },
+                    "client_id": {
+                        "type": "integer",
+                        "description": "Existing client identifier.",
                     },
                     "start_time": {
                         "type": "string",
@@ -213,8 +252,10 @@ OPENAI_FUNCTION_DEFINITIONS = [
                     },
                 },
                 "required": [
+                    "business_id",
                     "master_id",
                     "service_id",
+                    "client_id",
                     "start_time",
                     "client_data",
                 ],
@@ -227,13 +268,12 @@ OPENAI_FUNCTION_DEFINITIONS = [
 
 def execute_ai_function(
     *,
-    business: Business,
     function_name: str,
     payload: dict,
 ):
-    if function_name == "get_available_slots":
+    if function_name in {"get_available_slots", "get_free_slots"}:
         return get_available_slots(
-            business=business,
+            payload["business_id"],
             target_date=date.fromisoformat(payload["date"]),
             service_id=payload["service_id"],
             master_id=payload.get("master_id"),
@@ -241,9 +281,10 @@ def execute_ai_function(
 
     if function_name == "create_appointment":
         booking = create_appointment(
-            business=business,
+            payload["business_id"],
             master_id=payload["master_id"],
             service_id=payload["service_id"],
+            client_id=payload["client_id"],
             start_time=datetime.fromisoformat(payload["start_time"]),
             client_data=payload["client_data"],
         )

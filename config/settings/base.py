@@ -27,6 +27,7 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "django.contrib.postgres",
+    "phonenumber_field",
     "apps.bookings",
 ]
 
@@ -63,12 +64,12 @@ TEMPLATES = [
 DATABASES = {
     "default": env.db(
         "DATABASE_URL",
-        default="postgresql://postgres:postgres@localhost:5432/ai_admin_pro",
+        default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}",
     )
 }
 
 LANGUAGE_CODE = "ru-ru"
-TIME_ZONE = env("TIME_ZONE", default="UTC")
+TIME_ZONE = env("TIME_ZONE", default="Asia/Almaty")
 USE_I18N = True
 USE_TZ = True
 
@@ -78,6 +79,7 @@ MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+ADMIN_URL_PATH = env("ADMIN_URL_PATH", default="secure-admin/")
 
 CELERY_BROKER_URL = env(
     "CELERY_BROKER_URL",
@@ -91,9 +93,20 @@ CELERY_TASK_ALWAYS_EAGER = env("CELERY_TASK_ALWAYS_EAGER")
 
 OPENAI_API_KEY = env("OPENAI_API_KEY", default="")
 OPENAI_MODEL = env("OPENAI_MODEL", default="gpt-4o-mini")
-ALTEGIO_API_BASE_URL = env(
-    "ALTEGIO_API_BASE_URL",
-    default=(
-        "https://api.alteg.io/api/v1"
-    ),
+OPENAI_TRANSCRIPTION_MODEL = env(
+    "OPENAI_TRANSCRIPTION_MODEL",
+    default="whisper-1",
 )
+PHONENUMBER_DEFAULT_REGION = "KZ"
+PHONENUMBER_DB_FORMAT = "E164"
+ADMIN_ALERT_EMAIL = env("ADMIN_ALERT_EMAIL", default="")
+HUMAN_ESCALATION_CHAT_ID = env("HUMAN_ESCALATION_CHAT_ID", default="")
+WEBHOOK_SHARED_SECRET = env("WEBHOOK_SHARED_SECRET", default="")
+TELEGRAM_WEBHOOK_SECRET = env("TELEGRAM_WEBHOOK_SECRET", default="")
+GREEN_API_SHARED_SECRET = env("GREEN_API_SHARED_SECRET", default="")
+GREEN_API_ALLOWED_IPS = env("GREEN_API_ALLOWED_IPS", default=[])
+MAX_VOICE_FILE_SIZE_BYTES = env(
+    "MAX_VOICE_FILE_SIZE_BYTES",
+    default=10 * 1024 * 1024,
+)
+MAX_MESSAGES_PER_MINUTE = env("MAX_MESSAGES_PER_MINUTE", default=8)
