@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.env
+.venv/
+venv/
+media/
+staticfiles/
+.pytest_cache/
+.mypy_cache/
+
