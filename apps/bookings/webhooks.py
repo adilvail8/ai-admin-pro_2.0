@@ -169,10 +169,23 @@ def request_human_handoff(*, booking, reason: str, attempts: int):
             "escalated": False,
         }
 
-    handoff_result = notify_human_operator.run(
-        booking_id=booking.id,
-        reason=reason,
-        attempts=attempts,
+    handoff_result = (
+        notify_human_operator.apply(
+            kwargs={
+                "booking_id": booking.id,
+                "reason": reason,
+                "attempts": attempts,
+            }
+        ).get()
+        if settings.CELERY_TASK_ALWAYS_EAGER
+        else {
+            "notification_status": "queued",
+            "delivery_task_id": notify_human_operator.delay(
+                booking_id=booking.id,
+                reason=reason,
+                attempts=attempts,
+            ).id,
+        }
     )
     if handoff_result.get("notification_status") in {
         "submitted",

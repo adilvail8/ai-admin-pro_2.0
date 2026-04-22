@@ -62,9 +62,17 @@ class Business(TimeStampedModel):
 
     def save(self, *args, **kwargs):
         if not self.slug:
-            self.slug = slugify(self.name, allow_unicode=True)
-        self.full_clean()
+            self.slug = self.build_unique_slug()
         return super().save(*args, **kwargs)
+
+    def build_unique_slug(self):
+        base_slug = slugify(self.name, allow_unicode=True) or "business"
+        candidate = base_slug
+        counter = 1
+        while Business.objects.filter(slug=candidate).exclude(pk=self.pk).exists():
+            candidate = f"{base_slug}-{counter}"
+            counter += 1
+        return candidate
 
     def get_ai_setting(self, key, default=None):
         return self.ai_settings.get(key, default)
@@ -262,17 +270,18 @@ class Booking(TimeStampedModel):
             )
 
     def save(self, *args, **kwargs):
-        self.sync_service_duration()
-        self.calculate_end_time()
-        self.full_clean()
         update_fields = kwargs.get("update_fields")
-        if update_fields is not None:
-            kwargs["update_fields"] = set(update_fields) | {
-                "business",
-                "service_duration",
-                "service_buffer_time",
-                "end_time",
-            }
+        self.sync_business_relations()
+        requires_slot_sync = self.requires_slot_sync(update_fields)
+        if requires_slot_sync:
+            self.sync_service_duration()
+            self.calculate_end_time()
+            self.validate_domain_constraints()
+            if update_fields is not None:
+                kwargs["update_fields"] = list(
+                    set(update_fields)
+                    | {"business", "service_duration", "service_buffer_time", "end_time"}
+                )
         saved_instance = super().save(*args, **kwargs)
         self._original_service_id = self.service_id
         return saved_instance
@@ -286,6 +295,25 @@ class Booking(TimeStampedModel):
             self.end_time = self.start_time + self.total_slot_duration
         return self.end_time
 
+    def validate_domain_constraints(self):
+        if not self.start_time:
+            return
+
+        if timezone.is_naive(self.start_time):
+            raise ValidationError(
+                {"start_time": _("start_time must be timezone-aware.")}
+            )
+
+        if not self.pk and self.start_time < timezone.now():
+            raise ValidationError(
+                {"start_time": _("Cannot create a booking in the past.")}
+            )
+
+        if self.has_overlap():
+            raise ValidationError(
+                _("Selected time slot overlaps with another booking.")
+            )
+
     def sync_service_duration(self):
         should_refresh_snapshot = any(
             [
@@ -298,6 +326,24 @@ class Booking(TimeStampedModel):
         if should_refresh_snapshot:
             self.service_duration = self.service.duration
             self.service_buffer_time = self.service.buffer_time
+
+    def requires_slot_sync(self, update_fields):
+        if update_fields is None or not self.pk:
+            return True
+        return bool(
+            {
+                "business",
+                "business_id",
+                "client",
+                "client_id",
+                "master",
+                "master_id",
+                "service",
+                "service_id",
+                "start_time",
+            }
+            & set(update_fields)
+        )
 
     def sync_business_relations(self):
         if self.master_id and self.business_id != self.master.business_id:
@@ -413,6 +459,9 @@ class InboundEvent(models.Model):
             ),
         ]
 
+    def __str__(self):
+        return f"{self.channel}:{self.provider_event_id}"
+
 
 class OutboundMessage(TimeStampedModel):
     class Status(models.TextChoices):
@@ -458,6 +507,12 @@ class OutboundMessage(TimeStampedModel):
     submitted_at = models.DateTimeField(null=True, blank=True)
     delivered_at = models.DateTimeField(null=True, blank=True)
     dead_lettered_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=("booking", "message_type", "status")),
+            models.Index(fields=("status", "created_at")),
+        ]
 
 
 class AuditLog(TimeStampedModel):

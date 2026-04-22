@@ -1,3 +1,4 @@
+from datetime import timedelta
 from pathlib import Path
 
 import environ
@@ -10,6 +11,7 @@ env = environ.Env(
     ALLOWED_HOSTS=(list, []),
     CSRF_TRUSTED_ORIGINS=(list, []),
     CELERY_TASK_ALWAYS_EAGER=(bool, False),
+    GREEN_API_ALLOWED_IPS=(list, []),
 )
 environ.Env.read_env(BASE_DIR / ".env")
 
@@ -32,6 +34,7 @@ INSTALLED_APPS = [
     "django.contrib.postgres",
     "rest_framework",
     "rest_framework_simplejwt",
+    "rest_framework_simplejwt.token_blacklist",
     "phonenumber_field",
     "apps.accounts",
     "apps.api",
@@ -112,7 +115,7 @@ WEBHOOK_SHARED_SECRET = env("WEBHOOK_SHARED_SECRET", default="")
 TELEGRAM_WEBHOOK_SECRET = env("TELEGRAM_WEBHOOK_SECRET", default="")
 TELEGRAM_BOT_TOKEN = env("TELEGRAM_BOT_TOKEN", default="")
 GREEN_API_SHARED_SECRET = env("GREEN_API_SHARED_SECRET", default="")
-GREEN_API_ALLOWED_IPS = env("GREEN_API_ALLOWED_IPS", default=[])
+GREEN_API_ALLOWED_IPS = env("GREEN_API_ALLOWED_IPS")
 GREEN_API_URL = env("GREEN_API_URL", default="")
 GREEN_API_INSTANCE_ID = env("GREEN_API_INSTANCE_ID", default="")
 GREEN_API_API_TOKEN = env("GREEN_API_API_TOKEN", default="")
@@ -151,4 +154,13 @@ REST_FRAMEWORK = {
         "anon": API_ANON_RATE,
         "user": API_USER_RATE,
     },
+}
+
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=15),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
+    "ROTATE_REFRESH_TOKENS": True,
+    "BLACKLIST_AFTER_ROTATION": True,
+    "UPDATE_LAST_LOGIN": True,
+    "AUTH_HEADER_TYPES": ("Bearer",),
 }

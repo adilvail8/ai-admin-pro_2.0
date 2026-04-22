@@ -13,6 +13,17 @@ from .transports import get_transport_for_channel
 logger = logging.getLogger(__name__)
 
 
+def dispatch_outbound_delivery(outbound_message_id: int):
+    if settings.CELERY_TASK_ALWAYS_EAGER:
+        return send_outbound_message.apply(args=(outbound_message_id,)).get()
+    async_result = send_outbound_message.delay(outbound_message_id)
+    return {
+        "outbound_message_id": outbound_message_id,
+        "status": OutboundMessage.Status.QUEUED,
+        "delivery_task_id": async_result.id,
+    }
+
+
 def get_client_channel(client) -> str:
     if client.whatsapp_id:
         return "whatsapp"
@@ -140,7 +151,12 @@ def mark_outbound_as_failed(outbound_message: OutboundMessage, *, error_code: st
         )
 
 
-@shared_task(bind=True, autoretry_for=(Exception,), retry_backoff=True)
+@shared_task(
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    max_retries=3,
+)
 def send_outbound_message(self, outbound_message_id: int):
     outbound_message = (
         OutboundMessage.objects.select_related("booking", "client")
@@ -277,7 +293,12 @@ def send_outbound_message(self, outbound_message_id: int):
     }
 
 
-@shared_task(bind=True, autoretry_for=(Exception,), retry_backoff=True)
+@shared_task(
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    max_retries=3,
+)
 def send_booking_reminder(self, booking_id: int):
     booking = (
         Booking.objects.select_related("client", "service", "business")
@@ -318,10 +339,15 @@ def send_booking_reminder(self, booking_id: int):
             channel=channel,
             payload={"message_type": "reminder"},
         )
-    return send_outbound_message.run(outbound_message.id)
+    return dispatch_outbound_delivery(outbound_message.id)
 
 
-@shared_task(bind=True, autoretry_for=(Exception,), retry_backoff=True)
+@shared_task(
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    max_retries=3,
+)
 def send_follow_up_if_pending(self, booking_id: int):
     booking = (
         Booking.objects.select_related("client", "service", "business")
@@ -365,10 +391,15 @@ def send_follow_up_if_pending(self, booking_id: int):
             channel=channel,
             payload={"message_type": "follow_up"},
         )
-    return send_outbound_message.run(outbound_message.id)
+    return dispatch_outbound_delivery(outbound_message.id)
 
 
-@shared_task(bind=True, autoretry_for=(Exception,), retry_backoff=True)
+@shared_task(
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    max_retries=3,
+)
 def notify_human_operator(
     self,
     booking_id: int | None = None,
@@ -417,7 +448,9 @@ def notify_human_operator(
         message_type="handoff",
         text=message_text,
     )
-    send_result = send_outbound_message.run(outbound_message.id)
+    send_result = dispatch_outbound_delivery(outbound_message.id)
     escalation_payload["notification_status"] = send_result["status"]
     escalation_payload["notification_message_id"] = outbound_message.id
+    if send_result.get("delivery_task_id"):
+        escalation_payload["delivery_task_id"] = send_result["delivery_task_id"]
     return escalation_payload
