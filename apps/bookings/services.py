@@ -19,6 +19,15 @@ class TimeSlot:
     master_name: str
 
 
+def serialize_slot(slot: TimeSlot) -> dict:
+    return {
+        "start_time": slot.start.isoformat(),
+        "end_time": slot.end.isoformat(),
+        "master_id": slot.master_id,
+        "master_name": slot.master_name,
+    }
+
+
 def parse_clock(value: str) -> time:
     return time.fromisoformat(value)
 
@@ -272,12 +281,13 @@ def execute_ai_function(
     payload: dict,
 ):
     if function_name in {"get_available_slots", "get_free_slots"}:
-        return get_available_slots(
+        slots = get_available_slots(
             payload["business_id"],
             target_date=date.fromisoformat(payload["date"]),
             service_id=payload["service_id"],
             master_id=payload.get("master_id"),
         )
+        return [serialize_slot(slot) for slot in slots]
 
     if function_name == "create_appointment":
         booking = create_appointment(

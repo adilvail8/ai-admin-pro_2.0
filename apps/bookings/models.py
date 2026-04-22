@@ -374,6 +374,75 @@ class Client(TimeStampedModel):
         return self.name or str(self.phone)
 
 
+class InboundEvent(models.Model):
+    class Status(models.TextChoices):
+        RECEIVED = "received", _("Received")
+        PROCESSED = "processed", _("Processed")
+        FAILED = "failed", _("Failed")
+
+    business = models.ForeignKey(
+        Business,
+        on_delete=models.CASCADE,
+        related_name="inbound_events",
+    )
+    channel = models.CharField(max_length=32)
+    provider_event_id = models.CharField(max_length=255)
+    payload = models.JSONField()
+    status = models.CharField(
+        max_length=32,
+        choices=Status.choices,
+        default=Status.RECEIVED,
+    )
+    received_at = models.DateTimeField(auto_now_add=True)
+    processed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ("-received_at",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=("business", "channel", "provider_event_id"),
+                name="uniq_inbound_event",
+            ),
+        ]
+
+
+class OutboundMessage(TimeStampedModel):
+    class Status(models.TextChoices):
+        QUEUED = "queued", _("Queued")
+        SENT = "sent", _("Sent")
+        FAILED = "failed", _("Failed")
+
+    business = models.ForeignKey(
+        Business,
+        on_delete=models.CASCADE,
+        related_name="outbound_messages",
+    )
+    client = models.ForeignKey(
+        Client,
+        on_delete=models.CASCADE,
+        related_name="outbound_messages",
+    )
+    booking = models.ForeignKey(
+        Booking,
+        on_delete=models.CASCADE,
+        related_name="outbound_messages",
+        null=True,
+        blank=True,
+    )
+    channel = models.CharField(max_length=32)
+    message_type = models.CharField(max_length=32)
+    text = models.TextField()
+    status = models.CharField(
+        max_length=32,
+        choices=Status.choices,
+        default=Status.QUEUED,
+    )
+    provider_message_id = models.CharField(max_length=255, blank=True, default="")
+    attempts = models.PositiveIntegerField(default=0)
+    last_error = models.TextField(blank=True, default="")
+    sent_at = models.DateTimeField(null=True, blank=True)
+
+
 class ConversationMessage(TimeStampedModel):
     class Channel(models.TextChoices):
         TELEGRAM = "telegram", _("Telegram")

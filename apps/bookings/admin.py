@@ -1,6 +1,15 @@
 from django.contrib import admin
 
-from .models import Booking, Business, Client, ConversationMessage, Master, Service
+from .models import (
+    Booking,
+    Business,
+    Client,
+    ConversationMessage,
+    InboundEvent,
+    Master,
+    OutboundMessage,
+    Service,
+)
 
 
 @admin.register(Business)
@@ -65,3 +74,17 @@ class ConversationMessageAdmin(admin.ModelAdmin):
     list_display = ("id", "business", "client", "channel", "role", "created_at")
     list_filter = ("business", "channel", "role")
     search_fields = ("client__phone", "content")
+
+
+@admin.register(InboundEvent)
+class InboundEventAdmin(admin.ModelAdmin):
+    list_display = ("id", "business", "channel", "provider_event_id", "status", "received_at")
+    list_filter = ("business", "channel", "status")
+    search_fields = ("provider_event_id",)
+
+
+@admin.register(OutboundMessage)
+class OutboundMessageAdmin(admin.ModelAdmin):
+    list_display = ("id", "business", "client", "channel", "message_type", "status", "sent_at")
+    list_filter = ("business", "channel", "message_type", "status")
+    search_fields = ("client__phone", "text", "provider_message_id")
