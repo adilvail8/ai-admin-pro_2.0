@@ -46,6 +46,37 @@ def extract_provider_event_id(payload: dict, channel: str) -> str:
     return f"{channel}:{digest}"
 
 
+def normalize_whatsapp_green_api_payload(payload: dict, business_id: int) -> dict:
+    sender_data = payload.get("senderData", {})
+    message_data = payload.get("messageData", {})
+    type_message = message_data.get("typeMessage", "")
+
+    text = (
+        message_data.get("textMessageData", {}).get("textMessage")
+        or message_data.get("extendedTextMessageData", {}).get("text")
+        or payload.get("text", "")
+    )
+    if type_message and "text" not in type_message.lower():
+        raise ValidationError("Only text WhatsApp callbacks are supported for now.")
+
+    chat_id = str(sender_data.get("chatId", "")).strip()
+    phone = chat_id.replace("@c.us", "").replace("@g.us", "")
+    if phone and not phone.startswith("+"):
+        phone = f"+{phone}"
+
+    return {
+        "business_id": business_id,
+        "external_id": chat_id or str(sender_data.get("sender", "")).strip(),
+        "phone": phone,
+        "name": sender_data.get("senderName", ""),
+        "text": text,
+        "provider_event_id": (
+            str(payload.get("idMessage", "")).strip()
+            or str(message_data.get("idMessage", "")).strip()
+        ),
+    }
+
+
 def process_webhook_request(*, payload: dict, request, channel: str):
     business_id = int(payload["business_id"])
     business = get_business(business_id=business_id)
@@ -160,6 +191,32 @@ def green_api_webhook(request):
         payload = parse_request_payload(request)
         return process_webhook_request(
             payload=payload,
+            request=request,
+            channel=ConversationMessage.Channel.WHATSAPP,
+        )
+    except (KeyError, ValueError, ValidationError, json.JSONDecodeError) as error:
+        return JsonResponse({"detail": str(error)}, status=400)
+
+
+@csrf_exempt
+@require_POST
+def whatsapp_webhook(request, business_id: int):
+    try:
+        verify_green_api_request(
+            token=request.headers.get("X-GreenAPI-Secret", ""),
+            remote_addr=request.META.get("REMOTE_ADDR", ""),
+        )
+    except ValidationError as error:
+        return JsonResponse({"detail": str(error)}, status=403)
+
+    try:
+        provider_payload = parse_request_payload(request)
+        normalized_payload = normalize_whatsapp_green_api_payload(
+            provider_payload,
+            business_id,
+        )
+        return process_webhook_request(
+            payload=normalized_payload,
             request=request,
             channel=ConversationMessage.Channel.WHATSAPP,
         )

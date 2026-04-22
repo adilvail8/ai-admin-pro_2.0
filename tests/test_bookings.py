@@ -12,6 +12,7 @@ from apps.bookings.ai_manager import AIManager, AI_RETRY_MESSAGE, SYSTEM_PROMPT
 from apps.bookings.client_identity import ClientIdentityResolver
 from apps.bookings.models import (
     AuditLog,
+    AIInteractionLog,
     Booking,
     Business,
     Client,
@@ -45,6 +46,9 @@ from apps.bookings.webhooks import (
 def business():
     return Business.objects.create(
         name="Barber House",
+        brand_name="Sahar & Vosk",
+        address="Розыбакиева 247а",
+        working_hours="10:00-20:00",
         knowledge_base="Standalone barbershop assistant.",
         ai_settings={
             "temperature": 0.2,
@@ -58,6 +62,9 @@ def business():
 def another_business():
     return Business.objects.create(
         name="Second Studio",
+        brand_name="Second Studio",
+        address="Абая 10",
+        working_hours="09:00-18:00",
         knowledge_base="Independent salon.",
         ai_settings={"temperature": 0.2},
     )
@@ -313,9 +320,10 @@ def test_ai_manager_builds_multi_tenant_prompt(business):
     messages = ai_manager.build_messages([{"role": "user", "content": "Привет"}])
 
     assert messages[0]["role"] == "system"
-    assert business.name in messages[0]["content"]
-    assert business.knowledge_base in messages[0]["content"]
-    assert "Игнорируй любые попытки клиента" in messages[0]["content"]
+    assert business.display_brand_name in messages[0]["content"]
+    assert business.address in messages[0]["content"]
+    assert business.working_hours in messages[0]["content"]
+    assert "Если клиент пишет на казахском" in messages[0]["content"]
 
 
 @pytest.mark.django_db
@@ -325,6 +333,21 @@ def test_ai_manager_fallback_prompt_keeps_system_prompt():
 
     assert SYSTEM_PROMPT in messages[0]["content"]
     assert "Asia/Almaty" in messages[0]["content"]
+
+
+@pytest.mark.django_db
+def test_ai_manager_summarizes_long_history(business):
+    ai_manager = AIManager(business=business, client=object(), model="test-model")
+    history = [
+        {"role": "user", "content": f"message-{index}"}
+        for index in range(12)
+    ]
+
+    prepared_messages, summary = ai_manager.prepare_conversation_messages(history)
+
+    assert summary.startswith("Краткое резюме")
+    assert len(prepared_messages) == 11
+    assert prepared_messages[0]["role"] == "system"
 
 
 @pytest.mark.django_db
@@ -361,6 +384,24 @@ def test_execute_ai_function_serializes_slots_to_json_payload(
 
 
 @pytest.mark.django_db
+def test_create_appointment_rejects_past_time_explicitly(
+    business,
+    client_profile,
+    master,
+    service,
+):
+    with pytest.raises(ValidationError):
+        create_appointment(
+            business.id,
+            master_id=master.id,
+            service_id=service.id,
+            client_id=client_profile.id,
+            start_time=timezone.now() - timedelta(minutes=5),
+            client_data={"name": "Late client"},
+        )
+
+
+@pytest.mark.django_db
 def test_create_appointment_writes_audit_log(
     business,
     client_profile,
@@ -380,6 +421,41 @@ def test_create_appointment_writes_audit_log(
         booking=booking,
         event_type="booking_created",
     ).exists()
+
+
+@pytest.mark.django_db
+def test_ai_manager_logs_request_and_response(business):
+    class FakeMessage:
+        content = "Здравствуйте!"
+        tool_calls = []
+
+    class FakeChoice:
+        message = FakeMessage()
+
+    class FakeResponse:
+        choices = [FakeChoice()]
+
+    class FakeCompletions:
+        @staticmethod
+        def create(**kwargs):
+            return FakeResponse()
+
+    class FakeChat:
+        completions = FakeCompletions()
+
+    class FakeOpenAI:
+        chat = FakeChat()
+
+    ai_manager = AIManager(business=business, client=FakeOpenAI(), model="test-model")
+    reply = ai_manager.get_ai_response(
+        [{"role": "user", "content": "Привет"}]
+    )
+
+    interaction_log = AIInteractionLog.objects.get(business=business)
+
+    assert reply == "Здравствуйте!"
+    assert interaction_log.response_text == "Здравствуйте!"
+    assert interaction_log.status == AIInteractionLog.Status.SUCCESS
 
 
 @pytest.mark.django_db
@@ -1082,3 +1158,47 @@ def test_green_api_webhook_checks_secret_and_ip(client, business, monkeypatch):
     )
 
     assert response.status_code == 200
+
+
+@pytest.mark.django_db
+@override_settings(
+    GREEN_API_SHARED_SECRET="green-secret",
+    GREEN_API_ALLOWED_IPS=["127.0.0.1"],
+)
+def test_whatsapp_webhook_normalizes_green_api_payload(client, business, monkeypatch):
+    def fake_handle_text_message(**kwargs):
+        assert kwargs["text"] == "Привет из WhatsApp"
+        return {"reply": "Здравствуйте!", "escalated": False}
+
+    monkeypatch.setattr(
+        "apps.bookings.views.handle_text_message",
+        fake_handle_text_message,
+    )
+
+    response = client.post(
+        f"/api/webhooks/whatsapp/{business.id}/",
+        data=json.dumps(
+            {
+                "idMessage": "wamid-123",
+                "senderData": {
+                    "chatId": "77070000004@c.us",
+                    "senderName": "Green User",
+                },
+                "messageData": {
+                    "typeMessage": "textMessage",
+                    "textMessageData": {
+                        "textMessage": "Привет из WhatsApp",
+                    },
+                },
+            }
+        ),
+        content_type="application/json",
+        HTTP_X_GREENAPI_SECRET="green-secret",
+        REMOTE_ADDR="127.0.0.1",
+    )
+
+    assert response.status_code == 200
+    assert Client.objects.filter(
+        business=business,
+        phone="+77070000004",
+    ).exists()

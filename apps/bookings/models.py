@@ -33,6 +33,10 @@ class TimeStampedModel(models.Model):
 
 class Business(TimeStampedModel):
     name = models.CharField(max_length=255)
+    brand_name = models.CharField(max_length=255, blank=True, default="")
+    address = models.CharField(max_length=255, blank=True, default="")
+    city = models.CharField(max_length=120, default="Алматы")
+    working_hours = models.CharField(max_length=255, blank=True, default="")
     slug = models.SlugField(max_length=255, unique=True, blank=True)
     ai_settings = models.JSONField(
         default=dict,
@@ -64,6 +68,10 @@ class Business(TimeStampedModel):
 
     def get_ai_setting(self, key, default=None):
         return self.ai_settings.get(key, default)
+
+    @property
+    def display_brand_name(self):
+        return self.brand_name or self.name
 
 
 class Master(TimeStampedModel):
@@ -500,6 +508,35 @@ class AuditLog(TimeStampedModel):
             models.Index(fields=("business", "event_type", "created_at")),
             models.Index(fields=("outbound_message", "created_at")),
             models.Index(fields=("booking", "created_at")),
+        ]
+
+
+class AIInteractionLog(TimeStampedModel):
+    class Status(models.TextChoices):
+        SUCCESS = "success", _("Success")
+        FAILED = "failed", _("Failed")
+
+    business = models.ForeignKey(
+        Business,
+        on_delete=models.CASCADE,
+        related_name="ai_interaction_logs",
+    )
+    request_messages = models.JSONField(default=list, blank=True)
+    response_text = models.TextField(blank=True)
+    summary_text = models.TextField(blank=True)
+    model_name = models.CharField(max_length=100, blank=True, default="")
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.SUCCESS,
+    )
+    error_message = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+        indexes = [
+            models.Index(fields=("business", "created_at")),
+            models.Index(fields=("status", "created_at")),
         ]
 
 

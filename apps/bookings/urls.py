@@ -6,6 +6,7 @@ from .views import (
     messenger_webhook,
     outbound_delivery_webhook,
     telegram_webhook,
+    whatsapp_webhook,
 )
 
 
@@ -22,6 +23,11 @@ urlpatterns = [
         "webhooks/green-api/",
         green_api_webhook,
         name="green_api_webhook",
+    ),
+    path(
+        "webhooks/whatsapp/<int:business_id>/",
+        whatsapp_webhook,
+        name="whatsapp_webhook",
     ),
     path(
         "webhooks/outbound-delivery/",

@@ -144,6 +144,8 @@ def create_appointment(
         raise ValidationError(
             "start_time must include timezone information."
         )
+    if start_time < timezone.now():
+        raise ValidationError("Cannot create a booking in the past.")
 
     business = Business.objects.get(pk=business_id, is_active=True)
     master = business.masters.select_for_update().get(

@@ -2,6 +2,7 @@ from django.contrib import admin
 
 from .models import (
     AuditLog,
+    AIInteractionLog,
     Booking,
     Business,
     Client,
@@ -126,3 +127,16 @@ class AuditLogAdmin(admin.ModelAdmin):
     )
     list_filter = ("business", "event_type", "actor_type", "channel")
     search_fields = ("event_type", "client__phone", "booking__id")
+
+
+@admin.register(AIInteractionLog)
+class AIInteractionLogAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "business",
+        "model_name",
+        "status",
+        "created_at",
+    )
+    list_filter = ("business", "status", "model_name")
+    search_fields = ("response_text", "error_message")

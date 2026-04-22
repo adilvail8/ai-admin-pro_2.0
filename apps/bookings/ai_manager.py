@@ -7,14 +7,16 @@ from django.conf import settings
 from django.utils import timezone
 from openai import OpenAI
 
-from .ai.prompt_builder import PromptBuilder
-from .models import Booking, Business
+from .models import AIInteractionLog, Booking, Business
 from .services import OPENAI_FUNCTION_DEFINITIONS, execute_ai_function
 
 
 logger = logging.getLogger(__name__)
-SYSTEM_PROMPT = PromptBuilder.DEFAULT_PROMPT
 
+SYSTEM_PROMPT = (
+    "Ты — интеллектуальный администратор салона красоты в Казахстане. "
+    "Отвечай коротко, вежливо и только по данным из контекста."
+)
 VOICE_FALLBACK_MESSAGE = (
     "Кешіріңіз, мен әзірге дауыстық хабарламаларды түсінбеймін, "
     "өтініш, мәтінмен жазыңыз."
@@ -23,14 +25,13 @@ HUMAN_HANDOFF_MESSAGE = (
     "Сейчас подключу живого администратора. Он поможет с этим вопросом 🤝"
 )
 AI_RETRY_MESSAGE = (
-    "Не до конца поняла запрос. Уточните, пожалуйста, что именно нужно: "
-    "свободное время, стоимость или запись?"
+    "Извините, я сейчас обновляюсь, напишите через 5 минут "
+    "или позвоните администратору."
 )
 DEFAULT_FOLLOW_UP_TEMPLATE = (
     '"{client_name}", заметила, что мы не завершили запись на '
     "[{service_name}]. Подсказать что-нибудь по процедуре или "
-    "забронировать это время за вами? Оно сейчас очень популярно ✨ "
-    'Если неактуально, просто напишите "стоп".'
+    'забронировать это время за вами? Если неактуально, просто напишите "стоп".'
 )
 DEFAULT_REMINDER_TEMPLATE = (
     "Сәлем! Ждем вас сегодня в {time} на процедуру {service_name}. "
@@ -54,12 +55,10 @@ class AIManager:
         business: Business | None = None,
         client=None,
         model: str | None = None,
-        prompt_builder: PromptBuilder | None = None,
     ):
         self.business = business
         self.client = client
         self.model = model or settings.OPENAI_MODEL
-        self.prompt_builder = prompt_builder or PromptBuilder()
 
     def get_openai_client(self):
         if self.client is not None:
@@ -70,12 +69,68 @@ class AIManager:
 
     def build_system_instruction(self) -> str:
         if self.business is None:
-            return self.prompt_builder.build_fallback_prompt()
-        return self.prompt_builder.build_system_prompt(self.business)
+            current_dt = timezone.now().astimezone(ZoneInfo("Asia/Almaty"))
+            return "\n".join(
+                [
+                    SYSTEM_PROMPT,
+                    "Если клиент пишет на казахском — отвечай на казахском.",
+                    "Используй данные о компании только из предоставленного контекста.",
+                    f"Текущее время в Asia/Almaty: {current_dt:%Y-%m-%d %H:%M}.",
+                ]
+            )
+
+        business_tz = self.business.timezone_name or "Asia/Almaty"
+        current_dt = timezone.now().astimezone(ZoneInfo(business_tz))
+        return "\n".join(
+            [
+                (
+                    f"Ты — администратор салона {self.business.display_brand_name}. "
+                    f"Мы находимся по адресу: {self.business.city}, {self.business.address}. "
+                    f"Наш график: {self.business.working_hours}."
+                ),
+                "Если клиент пишет на казахском — отвечай на казахском.",
+                "Используй данные о компании только из предоставленного контекста.",
+                (
+                    "Никогда не выдумывай свободное время, услуги, цены или филиалы. "
+                    "Используй только функции и данные системы."
+                ),
+                f"Текущее локальное время: {current_dt:%Y-%m-%d %H:%M}.",
+                f"Контекст компании: {self.business.knowledge_base or 'не указан'}",
+            ]
+        )
+
+    def summarize_conversation(self, history):
+        """Scaffold for future LLM-based conversation summarization."""
+        if not history:
+            return ""
+
+        compressed_fragments = []
+        for item in history[:5]:
+            role = item.get("role", "user")
+            content = (item.get("content") or "").strip()
+            if content:
+                compressed_fragments.append(f"{role}: {content[:120]}")
+        return "Краткое резюме предыдущего диалога: " + " | ".join(
+            compressed_fragments
+        )
+
+    def prepare_conversation_messages(self, conversation_messages):
+        if len(conversation_messages) <= 10:
+            return conversation_messages, ""
+
+        summary = self.summarize_conversation(conversation_messages[:-10])
+        prepared_messages = []
+        if summary:
+            prepared_messages.append({"role": "system", "content": summary})
+        prepared_messages.extend(conversation_messages[-10:])
+        return prepared_messages, summary
 
     def build_messages(self, conversation_messages):
+        prepared_messages, _ = self.prepare_conversation_messages(
+            conversation_messages
+        )
         messages = [{"role": "system", "content": self.build_system_instruction()}]
-        messages.extend(conversation_messages)
+        messages.extend(prepared_messages)
         return messages
 
     def create_chat_completion(self, conversation_messages):
@@ -95,15 +150,46 @@ class AIManager:
             temperature=temperature,
         )
 
-    def generate_reply(self, conversation_messages):
-        response = self.create_chat_completion(conversation_messages)
+    def log_interaction(
+        self,
+        *,
+        request_messages,
+        response_text: str = "",
+        summary_text: str = "",
+        status: str,
+        error_message: str = "",
+    ):
+        if self.business is None:
+            return None
+        return AIInteractionLog.objects.create(
+            business=self.business,
+            request_messages=request_messages,
+            response_text=response_text,
+            summary_text=summary_text,
+            model_name=self.model,
+            status=status,
+            error_message=error_message,
+        )
+
+    def get_ai_response(self, conversation_messages):
+        prepared_messages, summary_text = self.prepare_conversation_messages(
+            conversation_messages
+        )
+        response = self.create_chat_completion(prepared_messages)
         message = response.choices[0].message
         tool_calls = getattr(message, "tool_calls", None) or []
 
         if not tool_calls:
-            return message.content or ""
+            final_text = message.content or ""
+            self.log_interaction(
+                request_messages=self.build_messages(prepared_messages),
+                response_text=final_text,
+                summary_text=summary_text,
+                status=AIInteractionLog.Status.SUCCESS,
+            )
+            return final_text
 
-        tool_messages = list(conversation_messages)
+        tool_messages = list(prepared_messages)
         tool_messages.append(
             {
                 "role": "assistant",
@@ -137,7 +223,27 @@ class AIManager:
             )
 
         follow_up_response = self.create_chat_completion(tool_messages)
-        return follow_up_response.choices[0].message.content or ""
+        final_text = follow_up_response.choices[0].message.content or ""
+        self.log_interaction(
+            request_messages=self.build_messages(tool_messages),
+            response_text=final_text,
+            summary_text=summary_text,
+            status=AIInteractionLog.Status.SUCCESS,
+        )
+        return final_text
+
+    def generate_reply(self, conversation_messages):
+        try:
+            return self.get_ai_response(conversation_messages)
+        except Exception as error:
+            logger.exception("ai_request_failed")
+            self.log_interaction(
+                request_messages=self.build_messages(conversation_messages),
+                summary_text="",
+                status=AIInteractionLog.Status.FAILED,
+                error_message=str(error),
+            )
+            raise
 
     def execute_tool_call(self, *, function_name: str, payload: dict):
         return execute_ai_function(
@@ -146,13 +252,12 @@ class AIManager:
         )
 
     def build_follow_up_message(self, *, client_name: str, service_name: str):
+        template = DEFAULT_FOLLOW_UP_TEMPLATE
         if self.business is not None:
             template = self.business.get_ai_setting(
                 "follow_up_template",
                 DEFAULT_FOLLOW_UP_TEMPLATE,
             )
-        else:
-            template = DEFAULT_FOLLOW_UP_TEMPLATE
         return template.format(
             client_name=client_name or "Здравствуйте",
             service_name=service_name,
