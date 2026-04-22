@@ -18,6 +18,10 @@ OPT_OUT_KEYWORDS = {"stop", "стоп", "отписаться", "не пиши",
 RATE_LIMIT_MESSAGE = (
     "Слишком много сообщений за короткое время. Давайте продолжим через минуту."
 )
+HUMAN_HANDOFF_DELAY_MESSAGE = (
+    "Я зафиксировала ваш запрос, но сейчас не смогла сразу передать его администратору. "
+    "Пожалуйста, напишите еще раз через пару минут."
+)
 
 
 def verify_webhook_token(token: str):
@@ -158,6 +162,32 @@ def process_opt_out(*, client: Client, text: str):
     return False
 
 
+def request_human_handoff(*, booking, reason: str, attempts: int):
+    if booking is None:
+        return {
+            "reply": HUMAN_HANDOFF_DELAY_MESSAGE,
+            "escalated": False,
+        }
+
+    handoff_result = notify_human_operator.run(
+        booking_id=booking.id,
+        reason=reason,
+        attempts=attempts,
+    )
+    if handoff_result.get("notification_status") in {
+        "submitted",
+        "delivered",
+    }:
+        return {
+            "reply": HUMAN_HANDOFF_MESSAGE,
+            "escalated": True,
+        }
+    return {
+        "reply": HUMAN_HANDOFF_DELAY_MESSAGE,
+        "escalated": False,
+    }
+
+
 def process_incoming_message(
     *,
     business_id: int,
@@ -205,19 +235,20 @@ def process_incoming_message(
         requested_human=requested_human,
         failed_attempts=client.ai_failure_count,
     ):
-        notify_human_operator.delay(
-            booking_id=booking.id if booking else None,
+        handoff_response = request_human_handoff(
+            booking=booking,
             reason="Client requested a human operator",
             attempts=client.ai_failure_count,
         )
+        assistant_reply = handoff_response["reply"]
         store_message(
             business_id=business_id,
             client=client,
             channel=channel,
             role=ConversationMessage.Role.ASSISTANT,
-            content=HUMAN_HANDOFF_MESSAGE,
+            content=assistant_reply,
         )
-        return {"reply": HUMAN_HANDOFF_MESSAGE, "escalated": True}
+        return handoff_response
 
     try:
         reply = ai_manager.generate_reply(
@@ -242,19 +273,20 @@ def process_incoming_message(
             requested_human=False,
             failed_attempts=client.ai_failure_count,
         ):
-            notify_human_operator.delay(
-                booking_id=booking.id if booking else None,
+            handoff_response = request_human_handoff(
+                booking=booking,
                 reason="AI failed to answer three times in a row",
                 attempts=client.ai_failure_count,
             )
+            assistant_reply = handoff_response["reply"]
             store_message(
                 business_id=business_id,
                 client=client,
                 channel=channel,
                 role=ConversationMessage.Role.ASSISTANT,
-                content=HUMAN_HANDOFF_MESSAGE,
+                content=assistant_reply,
             )
-            return {"reply": HUMAN_HANDOFF_MESSAGE, "escalated": True}
+            return handoff_response
 
         store_message(
             business_id=business_id,

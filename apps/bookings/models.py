@@ -409,7 +409,8 @@ class InboundEvent(models.Model):
 class OutboundMessage(TimeStampedModel):
     class Status(models.TextChoices):
         QUEUED = "queued", _("Queued")
-        SENT = "sent", _("Sent")
+        SUBMITTED = "submitted", _("Submitted")
+        DELIVERED = "delivered", _("Delivered")
         FAILED = "failed", _("Failed")
 
     business = models.ForeignKey(
@@ -421,6 +422,8 @@ class OutboundMessage(TimeStampedModel):
         Client,
         on_delete=models.CASCADE,
         related_name="outbound_messages",
+        null=True,
+        blank=True,
     )
     booking = models.ForeignKey(
         Booking,
@@ -430,6 +433,7 @@ class OutboundMessage(TimeStampedModel):
         blank=True,
     )
     channel = models.CharField(max_length=32)
+    recipient = models.CharField(max_length=255, blank=True, default="")
     message_type = models.CharField(max_length=32)
     text = models.TextField()
     status = models.CharField(
@@ -438,9 +442,12 @@ class OutboundMessage(TimeStampedModel):
         default=Status.QUEUED,
     )
     provider_message_id = models.CharField(max_length=255, blank=True, default="")
+    provider_response = models.JSONField(default=dict, blank=True)
     attempts = models.PositiveIntegerField(default=0)
+    error_code = models.CharField(max_length=64, blank=True, default="")
     last_error = models.TextField(blank=True, default="")
-    sent_at = models.DateTimeField(null=True, blank=True)
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    delivered_at = models.DateTimeField(null=True, blank=True)
 
 
 class ConversationMessage(TimeStampedModel):

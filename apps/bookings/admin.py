@@ -85,6 +85,15 @@ class InboundEventAdmin(admin.ModelAdmin):
 
 @admin.register(OutboundMessage)
 class OutboundMessageAdmin(admin.ModelAdmin):
-    list_display = ("id", "business", "client", "channel", "message_type", "status", "sent_at")
+    list_display = (
+        "id",
+        "business",
+        "client",
+        "channel",
+        "message_type",
+        "status",
+        "submitted_at",
+        "delivered_at",
+    )
     list_filter = ("business", "channel", "message_type", "status")
     search_fields = ("client__phone", "text", "provider_message_id")

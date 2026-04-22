@@ -374,8 +374,8 @@ def test_follow_up_task_creates_and_sends_outbound_message(
         message_type="follow_up",
     )
 
-    assert result["status"] == OutboundMessage.Status.SENT
-    assert outbound_message.sent_at is not None
+    assert result["status"] == OutboundMessage.Status.SUBMITTED
+    assert outbound_message.submitted_at is not None
     assert booking.follow_up_sent_at is not None
 
 
@@ -403,10 +403,81 @@ def test_reminder_task_creates_and_sends_outbound_message(
         message_type="reminder",
     )
 
-    assert result["status"] == OutboundMessage.Status.SENT
+    assert result["status"] == OutboundMessage.Status.SUBMITTED
     assert service.name in result["text"]
-    assert outbound_message.sent_at is not None
+    assert outbound_message.submitted_at is not None
     assert booking.reminder_sent_at is not None
+
+
+@pytest.mark.django_db
+def test_outbound_message_is_not_marked_submitted_when_transport_fails(
+    business,
+    client_profile,
+    master,
+    service,
+    monkeypatch,
+):
+    class FailingTransport:
+        def send_text(self, *, recipient, text, metadata=None):
+            raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(
+        "apps.bookings.tasks.get_transport_for_channel",
+        lambda channel: FailingTransport(),
+    )
+
+    booking = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(hours=1, minutes=50),
+        client_data={"name": client_profile.name},
+        status=Booking.Status.CONFIRMED,
+    )
+
+    result = send_booking_reminder.run(booking.id)
+    booking.refresh_from_db()
+    outbound_message = OutboundMessage.objects.get(
+        booking=booking,
+        message_type="reminder",
+    )
+
+    assert result["status"] == OutboundMessage.Status.FAILED
+    assert outbound_message.submitted_at is None
+    assert booking.reminder_sent_at is None
+
+
+@pytest.mark.django_db
+def test_notify_human_operator_reports_delivery_status(
+    business,
+    client_profile,
+    master,
+    service,
+):
+    booking = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(days=1),
+        client_data={"name": client_profile.name},
+        status=Booking.Status.PENDING,
+    )
+
+    result = notify_human_operator.run(
+        booking_id=booking.id,
+        reason="Client requested a live administrator",
+        attempts=1,
+    )
+
+    outbound_message = OutboundMessage.objects.get(
+        booking=booking,
+        message_type="handoff",
+    )
+
+    assert result["notification_status"] == OutboundMessage.Status.SUBMITTED
+    assert outbound_message.provider_message_id
 
 
 @pytest.mark.django_db
