@@ -1,3 +1,11 @@
+import os
+
+
+os.environ.setdefault(
+    "DJANGO_SECRET_KEY",
+    "test-secret-key-for-jwt-signing-with-safe-length-1234567890",
+)
+
 from .base import *  # noqa: F403,F401
 
 
@@ -5,7 +13,6 @@ DEBUG = False
 PASSWORD_HASHERS = [
     "django.contrib.auth.hashers.MD5PasswordHasher",
 ]
-SECRET_KEY = "test-secret-key-for-jwt-signing-with-safe-length-1234567890"
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",

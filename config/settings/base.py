@@ -16,10 +16,7 @@ env = environ.Env(
 environ.Env.read_env(BASE_DIR / ".env")
 
 
-SECRET_KEY = env(
-    "DJANGO_SECRET_KEY",
-    default="unsafe-dev-secret-key-for-local-jwt-signing-please-change",
-)
+SECRET_KEY = env("DJANGO_SECRET_KEY")
 DEBUG = env("DEBUG")
 ALLOWED_HOSTS = env("ALLOWED_HOSTS")
 CSRF_TRUSTED_ORIGINS = env("CSRF_TRUSTED_ORIGINS")
@@ -31,7 +28,6 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
-    "django.contrib.postgres",
     "rest_framework",
     "rest_framework_simplejwt",
     "rest_framework_simplejwt.token_blacklist",

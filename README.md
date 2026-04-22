@@ -42,12 +42,12 @@ Base path: `/api/v1/`
 
 ## Webhooks And Ops
 
-- `/api/webhooks/messenger/`
-- `/api/webhooks/telegram/<secret>/`
-- `/api/webhooks/green-api/`
-- `/api/webhooks/whatsapp/<business_id>/`
-- `/api/webhooks/outbound-delivery/`
-- `/api/health/`
+- `/api/v1/webhooks/messenger/`
+- `/api/v1/webhooks/telegram/<secret>/`
+- `/api/v1/webhooks/green-api/`
+- `/api/v1/webhooks/whatsapp/<business_id>/`
+- `/api/v1/webhooks/outbound-delivery/`
+- `/api/v1/health/`
 
 ## Local Tests
 

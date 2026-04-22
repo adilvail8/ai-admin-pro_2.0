@@ -119,13 +119,19 @@ def get_latest_active_booking(*, business_id: int, client: Client):
 
 
 def store_message(*, business_id: int, client: Client, channel: str, role: str, content: str):
-    return ConversationMessage.objects.create(
+    message = ConversationMessage.objects.create(
         business_id=business_id,
         client=client,
         channel=channel,
         role=role,
         content=content,
     )
+    ConversationMessage.prune_history(
+        business_id=business_id,
+        client_id=client.id,
+        channel=channel,
+    )
+    return message
 
 
 def build_conversation_context(*, business_id: int, client: Client, channel: str):

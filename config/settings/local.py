@@ -1,3 +1,11 @@
+import os
+
+
+os.environ.setdefault(
+    "DJANGO_SECRET_KEY",
+    "unsafe-dev-local-secret-key-for-development-only",
+)
+
 from .base import *  # noqa: F403,F401
 
 

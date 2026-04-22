@@ -791,7 +791,7 @@ def test_outbound_delivery_webhook_marks_message_as_delivered(
     )
 
     response = client.post(
-        "/api/webhooks/outbound-delivery/",
+        "/api/v1/webhooks/outbound-delivery/",
         data=json.dumps(
             {
                 "provider_message_id": "provider-123",
@@ -815,7 +815,7 @@ def test_outbound_delivery_webhook_marks_message_as_delivered(
 
 @pytest.mark.django_db
 def test_healthcheck_returns_ok(client):
-    response = client.get("/api/health/")
+    response = client.get("/api/v1/health/")
 
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
@@ -879,6 +879,20 @@ def test_bookings_api_is_scoped_by_business_membership(
 
     assert bookings_response.status_code == 200
     assert bookings_response.json()[0]["id"] == booking.id
+
+
+@pytest.mark.django_db
+def test_cannot_deactivate_last_business_owner(business_membership):
+    business_membership.is_active = False
+
+    with pytest.raises(ValidationError):
+        business_membership.save()
+
+
+@pytest.mark.django_db
+def test_cannot_delete_last_business_owner(business_membership):
+    with pytest.raises(ValidationError):
+        business_membership.delete()
 
 
 @pytest.mark.django_db
@@ -1053,7 +1067,7 @@ def test_get_or_create_client_reuses_existing_phone_record(business):
 @override_settings(WEBHOOK_SHARED_SECRET="secret-token")
 def test_webhook_rejects_invalid_token(client):
     response = client.post(
-        "/api/webhooks/messenger/",
+        "/api/v1/webhooks/messenger/",
         data=json.dumps(
             {
                 "business_id": 1,
@@ -1081,7 +1095,7 @@ def test_webhook_accepts_text_message(client, business, monkeypatch):
     )
 
     response = client.post(
-        "/api/webhooks/messenger/",
+        "/api/v1/webhooks/messenger/",
         data=json.dumps(
             {
                 "business_id": business.id,
@@ -1124,13 +1138,13 @@ def test_webhook_deduplicates_inbound_event(client, business, monkeypatch):
         "provider_event_id": "evt-duplicate",
     }
     first = client.post(
-        "/api/webhooks/messenger/",
+        "/api/v1/webhooks/messenger/",
         data=json.dumps(payload),
         content_type="application/json",
         HTTP_X_WEBHOOK_TOKEN="secret-token",
     )
     second = client.post(
-        "/api/webhooks/messenger/",
+        "/api/v1/webhooks/messenger/",
         data=json.dumps(payload),
         content_type="application/json",
         HTTP_X_WEBHOOK_TOKEN="secret-token",
@@ -1163,7 +1177,7 @@ def test_webhook_accepts_voice_message(client, business, monkeypatch):
         content_type="audio/ogg",
     )
     response = client.post(
-        "/api/webhooks/messenger/",
+        "/api/v1/webhooks/messenger/",
         data={
             "business_id": str(business.id),
             "channel": "whatsapp",
@@ -1192,7 +1206,7 @@ def test_telegram_webhook_requires_secret(client, business, monkeypatch):
     )
 
     response = client.post(
-        "/api/webhooks/telegram/tg-secret-123/",
+        "/api/v1/webhooks/telegram/tg-secret-123/",
         data=json.dumps(
             {
                 "business_id": business.id,
@@ -1224,7 +1238,7 @@ def test_green_api_webhook_checks_secret_and_ip(client, business, monkeypatch):
     )
 
     response = client.post(
-        "/api/webhooks/green-api/",
+        "/api/v1/webhooks/green-api/",
         data=json.dumps(
             {
                 "business_id": business.id,
@@ -1259,7 +1273,7 @@ def test_whatsapp_webhook_normalizes_green_api_payload(client, business, monkeyp
     )
 
     response = client.post(
-        f"/api/webhooks/whatsapp/{business.id}/",
+        f"/api/v1/webhooks/whatsapp/{business.id}/",
         data=json.dumps(
             {
                 "idMessage": "wamid-123",

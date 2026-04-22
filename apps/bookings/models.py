@@ -637,21 +637,26 @@ class ConversationMessage(TimeStampedModel):
 
     def save(self, *args, **kwargs):
         self.full_clean()
-        saved_instance = super().save(*args, **kwargs)
-        self.prune_history()
-        return saved_instance
+        return super().save(*args, **kwargs)
 
-    def prune_history(self):
-        stale_message_ids = list(
-            ConversationMessage.objects.filter(
-                business_id=self.business_id,
-                client_id=self.client_id,
-                channel=self.channel,
+    @classmethod
+    def prune_history(cls, *, business_id: int, client_id: int, channel: str):
+        message_ids = list(
+            cls.objects.filter(
+                business_id=business_id,
+                client_id=client_id,
+                channel=channel,
             )
             .order_by("-created_at", "-id")
-            .values_list("id", flat=True)[MAX_CONVERSATION_MESSAGES:]
+            .values_list("id", flat=True)
+        )
+        if len(message_ids) <= MAX_CONVERSATION_MESSAGES + 5:
+            return
+
+        stale_message_ids = list(
+            message_ids[MAX_CONVERSATION_MESSAGES:]
         )
         if stale_message_ids:
-            ConversationMessage.objects.filter(
+            cls.objects.filter(
                 id__in=stale_message_ids
             ).delete()
