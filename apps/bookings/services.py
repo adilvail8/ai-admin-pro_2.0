@@ -5,6 +5,7 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
 
+from .audit import create_audit_log
 from .models import Booking, Business, Client
 
 
@@ -180,6 +181,21 @@ def create_appointment(
     )
     booking.full_clean()
     booking.save()
+    create_audit_log(
+        business=business,
+        client=client,
+        booking=booking,
+        actor_type="system",
+        event_type="booking_created",
+        channel="booking",
+        payload={
+            "master_id": master.id,
+            "service_id": service.id,
+            "status": booking.status,
+            "start_time": booking.start_time.isoformat(),
+            "end_time": booking.end_time.isoformat(),
+        },
+    )
     return booking
 
 

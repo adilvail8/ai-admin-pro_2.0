@@ -9,6 +9,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
+from .audit import create_audit_log
 from .models import ConversationMessage, OutboundMessage
 from .webhooks import (
     get_business,
@@ -193,6 +194,16 @@ def outbound_delivery_webhook(request):
             outbound_message.save(
                 update_fields=["status", "delivered_at", "provider_response", "updated_at"]
             )
+            create_audit_log(
+                business=outbound_message.business,
+                client=outbound_message.client,
+                booking=outbound_message.booking,
+                outbound_message=outbound_message,
+                actor_type="provider",
+                event_type="outbound_delivery_confirmed",
+                channel=outbound_message.channel,
+                payload=payload,
+            )
         return JsonResponse(
             {
                 "outbound_message_id": outbound_message.id,
@@ -217,6 +228,21 @@ def healthcheck(request):
         "database": "ok" if db_ok else "failed",
         "broker_configured": "ok" if settings.CELERY_BROKER_URL else "failed",
         "openai_configured": "ok" if settings.OPENAI_API_KEY else "degraded",
+        "telegram_transport": (
+            "ok" if settings.TELEGRAM_BOT_TOKEN else "degraded"
+        ),
+        "whatsapp_transport": (
+            "ok"
+            if (
+                settings.GREEN_API_URL
+                and settings.GREEN_API_INSTANCE_ID
+                and settings.GREEN_API_API_TOKEN
+            )
+            else "degraded"
+        ),
+        "internal_alert_transport": (
+            "ok" if settings.INTERNAL_ALERT_WEBHOOK_URL else "degraded"
+        ),
     }
     overall_status = "ok" if checks["database"] == "ok" else "failed"
     return JsonResponse({"status": overall_status, "checks": checks}, status=200 if db_ok else 503)

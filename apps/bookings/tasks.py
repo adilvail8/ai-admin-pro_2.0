@@ -5,6 +5,7 @@ from django.conf import settings
 from django.utils import timezone
 
 from .ai_manager import AIManager
+from .audit import create_audit_log
 from .models import Booking, OutboundMessage
 from .transports import get_transport_for_channel
 
@@ -104,10 +105,38 @@ def mark_outbound_as_failed(outbound_message: OutboundMessage, *, error_code: st
                 "updated_at",
             ]
         )
+        create_audit_log(
+            business=outbound_message.business,
+            client=outbound_message.client,
+            booking=outbound_message.booking,
+            outbound_message=outbound_message,
+            actor_type="system",
+            event_type="outbound_dead_letter",
+            channel=outbound_message.channel,
+            payload={
+                "attempts": outbound_message.attempts,
+                "error_code": error_code,
+                "error_message": error_message,
+            },
+        )
     else:
         outbound_message.status = OutboundMessage.Status.FAILED
         outbound_message.save(
             update_fields=["status", "error_code", "last_error", "updated_at"]
+        )
+        create_audit_log(
+            business=outbound_message.business,
+            client=outbound_message.client,
+            booking=outbound_message.booking,
+            outbound_message=outbound_message,
+            actor_type="system",
+            event_type="outbound_failed",
+            channel=outbound_message.channel,
+            payload={
+                "attempts": outbound_message.attempts,
+                "error_code": error_code,
+                "error_message": error_message,
+            },
         )
 
 
@@ -212,6 +241,24 @@ def send_outbound_message(self, outbound_message_id: int):
                 "status": outbound_message.status,
             },
         )
+        create_audit_log(
+            business=outbound_message.business,
+            client=outbound_message.client,
+            booking=outbound_message.booking,
+            outbound_message=outbound_message,
+            actor_type="provider",
+            event_type=(
+                "outbound_delivered"
+                if outbound_message.status == OutboundMessage.Status.DELIVERED
+                else "outbound_submitted"
+            ),
+            channel=outbound_message.channel,
+            payload={
+                "provider_message_id": outbound_message.provider_message_id,
+                "status": outbound_message.status,
+                "response": outbound_message.provider_response,
+            },
+        )
         sync_booking_delivery_marker(outbound_message)
     else:
         mark_outbound_as_failed(
@@ -261,6 +308,16 @@ def send_booking_reminder(self, booking_id: int):
                 "message_type": "reminder",
             },
         )
+        create_audit_log(
+            business=booking.business,
+            client=booking.client,
+            booking=booking,
+            outbound_message=outbound_message,
+            actor_type="system",
+            event_type="reminder_queued",
+            channel=channel,
+            payload={"message_type": "reminder"},
+        )
     return send_outbound_message.run(outbound_message.id)
 
 
@@ -298,6 +355,16 @@ def send_follow_up_if_pending(self, booking_id: int):
                 "message_type": "follow_up",
             },
         )
+        create_audit_log(
+            business=booking.business,
+            client=booking.client,
+            booking=booking,
+            outbound_message=outbound_message,
+            actor_type="ai",
+            event_type="follow_up_queued",
+            channel=channel,
+            payload={"message_type": "follow_up"},
+        )
     return send_outbound_message.run(outbound_message.id)
 
 
@@ -322,6 +389,16 @@ def notify_human_operator(
         escalation_payload["notification_status"] = OutboundMessage.Status.FAILED
         escalation_payload["error_code"] = "booking_not_found_for_handoff"
         return escalation_payload
+
+    create_audit_log(
+        business=booking.business,
+        client=booking.client,
+        booking=booking,
+        actor_type="ai",
+        event_type="handoff_requested",
+        channel="internal",
+        payload={"reason": reason, "attempts": attempts},
+    )
 
     message_text = (
         f"Handoff requested. Reason: {reason}. Attempts: {attempts}. "

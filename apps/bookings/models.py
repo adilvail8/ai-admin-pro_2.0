@@ -452,6 +452,57 @@ class OutboundMessage(TimeStampedModel):
     dead_lettered_at = models.DateTimeField(null=True, blank=True)
 
 
+class AuditLog(TimeStampedModel):
+    class ActorType(models.TextChoices):
+        SYSTEM = "system", _("System")
+        AI = "ai", _("AI")
+        HUMAN = "human", _("Human")
+        PROVIDER = "provider", _("Provider")
+
+    business = models.ForeignKey(
+        Business,
+        on_delete=models.CASCADE,
+        related_name="audit_logs",
+    )
+    client = models.ForeignKey(
+        Client,
+        on_delete=models.SET_NULL,
+        related_name="audit_logs",
+        null=True,
+        blank=True,
+    )
+    booking = models.ForeignKey(
+        Booking,
+        on_delete=models.SET_NULL,
+        related_name="audit_logs",
+        null=True,
+        blank=True,
+    )
+    outbound_message = models.ForeignKey(
+        OutboundMessage,
+        on_delete=models.SET_NULL,
+        related_name="audit_logs",
+        null=True,
+        blank=True,
+    )
+    actor_type = models.CharField(
+        max_length=20,
+        choices=ActorType.choices,
+        default=ActorType.SYSTEM,
+    )
+    event_type = models.CharField(max_length=64)
+    channel = models.CharField(max_length=32, blank=True, default="")
+    payload = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+        indexes = [
+            models.Index(fields=("business", "event_type", "created_at")),
+            models.Index(fields=("outbound_message", "created_at")),
+            models.Index(fields=("booking", "created_at")),
+        ]
+
+
 class ConversationMessage(TimeStampedModel):
     class Channel(models.TextChoices):
         TELEGRAM = "telegram", _("Telegram")

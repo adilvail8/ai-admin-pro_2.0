@@ -11,6 +11,7 @@ from django.utils import timezone
 from apps.bookings.ai_manager import AIManager, AI_RETRY_MESSAGE, SYSTEM_PROMPT
 from apps.bookings.client_identity import ClientIdentityResolver
 from apps.bookings.models import (
+    AuditLog,
     Booking,
     Business,
     Client,
@@ -31,6 +32,7 @@ from apps.bookings.tasks import (
     send_booking_reminder,
     send_follow_up_if_pending,
 )
+from apps.bookings.transports import SendResult, TelegramTransport, WhatsAppTransport
 from apps.bookings.webhooks import (
     VOICE_FALLBACK_MESSAGE,
     get_or_create_client,
@@ -116,6 +118,16 @@ class StubAIManager:
 
     def handle_voice_message(self, file_obj):
         return "Хочу записаться"
+
+
+class AcceptingTransport:
+    def send_text(self, *, recipient, text, metadata=None):
+        return SendResult(
+            accepted=True,
+            delivered=False,
+            provider_message_id="provider-accepted-1",
+            raw_response={"recipient": recipient, "metadata": metadata or {}},
+        )
 
 
 @pytest.mark.django_db
@@ -349,12 +361,39 @@ def test_execute_ai_function_serializes_slots_to_json_payload(
 
 
 @pytest.mark.django_db
-def test_follow_up_task_creates_and_sends_outbound_message(
+def test_create_appointment_writes_audit_log(
     business,
     client_profile,
     master,
     service,
 ):
+    booking = create_appointment(
+        business.id,
+        master_id=master.id,
+        service_id=service.id,
+        client_id=client_profile.id,
+        start_time=timezone.now() + timedelta(days=2),
+        client_data={"name": "Olga"},
+    )
+
+    assert AuditLog.objects.filter(
+        booking=booking,
+        event_type="booking_created",
+    ).exists()
+
+
+@pytest.mark.django_db
+def test_follow_up_task_creates_and_sends_outbound_message(
+    business,
+    client_profile,
+    master,
+    service,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "apps.bookings.tasks.get_transport_for_channel",
+        lambda channel: AcceptingTransport(),
+    )
     booking = Booking.objects.create(
         business=business,
         client=client_profile,
@@ -377,6 +416,90 @@ def test_follow_up_task_creates_and_sends_outbound_message(
     assert result["status"] == OutboundMessage.Status.SUBMITTED
     assert outbound_message.submitted_at is not None
     assert booking.follow_up_sent_at is not None
+    assert AuditLog.objects.filter(
+        outbound_message=outbound_message,
+        event_type="outbound_submitted",
+    ).exists()
+
+
+def test_telegram_transport_builds_provider_result(monkeypatch):
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"ok": True, "result": {"message_id": 77}}
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url, json=None, headers=None):
+            assert "sendMessage" in url
+            assert json["chat_id"] == "12345"
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        "apps.bookings.transports.httpx.Client",
+        FakeClient,
+    )
+
+    with override_settings(TELEGRAM_BOT_TOKEN="bot-token"):
+        result = TelegramTransport().send_text(
+            recipient="12345",
+            text="hello",
+        )
+
+    assert result.accepted is True
+    assert result.provider_message_id == "77"
+
+
+def test_whatsapp_transport_normalizes_chat_id(monkeypatch):
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"idMessage": "wamid-1"}
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url, json=None, headers=None):
+            assert "waInstance123/sendMessage/token-1" in url
+            assert json["chatId"] == "77071234567@c.us"
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        "apps.bookings.transports.httpx.Client",
+        FakeClient,
+    )
+
+    with override_settings(
+        GREEN_API_URL="https://7105.api.greenapi.com",
+        GREEN_API_INSTANCE_ID="123",
+        GREEN_API_API_TOKEN="token-1",
+    ):
+        result = WhatsAppTransport().send_text(
+            recipient="+77071234567",
+            text="hello",
+        )
+
+    assert result.accepted is True
+    assert result.provider_message_id == "wamid-1"
 
 
 @pytest.mark.django_db
@@ -385,7 +508,12 @@ def test_reminder_task_creates_and_sends_outbound_message(
     client_profile,
     master,
     service,
+    monkeypatch,
 ):
+    monkeypatch.setattr(
+        "apps.bookings.tasks.get_transport_for_channel",
+        lambda channel: AcceptingTransport(),
+    )
     booking = Booking.objects.create(
         business=business,
         client=client_profile,
@@ -407,6 +535,10 @@ def test_reminder_task_creates_and_sends_outbound_message(
     assert service.name in result["text"]
     assert outbound_message.submitted_at is not None
     assert booking.reminder_sent_at is not None
+    assert AuditLog.objects.filter(
+        outbound_message=outbound_message,
+        event_type="reminder_queued",
+    ).exists()
 
 
 @pytest.mark.django_db
@@ -504,7 +636,12 @@ def test_notify_human_operator_reports_delivery_status(
     client_profile,
     master,
     service,
+    monkeypatch,
 ):
+    monkeypatch.setattr(
+        "apps.bookings.tasks.get_transport_for_channel",
+        lambda channel: AcceptingTransport(),
+    )
     booking = Booking.objects.create(
         business=business,
         client=client_profile,
@@ -528,6 +665,10 @@ def test_notify_human_operator_reports_delivery_status(
 
     assert result["notification_status"] == OutboundMessage.Status.SUBMITTED
     assert outbound_message.provider_message_id
+    assert AuditLog.objects.filter(
+        booking=booking,
+        event_type="handoff_requested",
+    ).exists()
 
 
 @pytest.mark.django_db
@@ -567,6 +708,10 @@ def test_outbound_delivery_webhook_marks_message_as_delivered(
     assert response.status_code == 200
     assert outbound_message.status == OutboundMessage.Status.DELIVERED
     assert outbound_message.delivered_at is not None
+    assert AuditLog.objects.filter(
+        outbound_message=outbound_message,
+        event_type="outbound_delivery_confirmed",
+    ).exists()
 
 
 @pytest.mark.django_db

@@ -1,6 +1,7 @@
 from django.contrib import admin
 
 from .models import (
+    AuditLog,
     Booking,
     Business,
     Client,
@@ -105,6 +106,23 @@ class OutboundMessageAdmin(admin.ModelAdmin):
         "provider_message_id",
         "submitted_at",
         "delivered_at",
+        "dead_lettered_at",
     )
     list_filter = ("business", "channel", "message_type", "status")
     search_fields = ("client__phone", "text", "provider_message_id")
+
+
+@admin.register(AuditLog)
+class AuditLogAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "business",
+        "event_type",
+        "actor_type",
+        "channel",
+        "client",
+        "booking",
+        "created_at",
+    )
+    list_filter = ("business", "event_type", "actor_type", "channel")
+    search_fields = ("event_type", "client__phone", "booking__id")
