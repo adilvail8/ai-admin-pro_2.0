@@ -88,6 +88,29 @@ def sync_booking_delivery_marker(outbound_message: OutboundMessage):
         booking.save(update_fields=["follow_up_sent_at", "updated_at"])
 
 
+def mark_outbound_as_failed(outbound_message: OutboundMessage, *, error_code: str, error_message: str):
+    max_attempts = settings.MAX_OUTBOUND_ATTEMPTS
+    outbound_message.error_code = error_code
+    outbound_message.last_error = error_message
+    if outbound_message.attempts >= max_attempts:
+        outbound_message.status = OutboundMessage.Status.DEAD_LETTER
+        outbound_message.dead_lettered_at = timezone.now()
+        outbound_message.save(
+            update_fields=[
+                "status",
+                "error_code",
+                "last_error",
+                "dead_lettered_at",
+                "updated_at",
+            ]
+        )
+    else:
+        outbound_message.status = OutboundMessage.Status.FAILED
+        outbound_message.save(
+            update_fields=["status", "error_code", "last_error", "updated_at"]
+        )
+
+
 @shared_task(bind=True, autoretry_for=(Exception,), retry_backoff=True)
 def send_outbound_message(self, outbound_message_id: int):
     outbound_message = (
@@ -104,6 +127,7 @@ def send_outbound_message(self, outbound_message_id: int):
     if outbound_message.status in {
         OutboundMessage.Status.SUBMITTED,
         OutboundMessage.Status.DELIVERED,
+        OutboundMessage.Status.DEAD_LETTER,
     }:
         return {
             "outbound_message_id": outbound_message.id,
@@ -131,15 +155,17 @@ def send_outbound_message(self, outbound_message_id: int):
         logger.exception(
             "outbound_transport_failed",
             extra={
+                "business_id": outbound_message.business_id,
+                "client_id": outbound_message.client_id,
+                "booking_id": outbound_message.booking_id,
                 "outbound_message_id": outbound_message.id,
                 "channel": outbound_message.channel,
             },
         )
-        outbound_message.status = OutboundMessage.Status.FAILED
-        outbound_message.error_code = "transport_exception"
-        outbound_message.last_error = str(error)
-        outbound_message.save(
-            update_fields=["status", "error_code", "last_error", "updated_at"]
+        mark_outbound_as_failed(
+            outbound_message,
+            error_code="transport_exception",
+            error_message=str(error),
         )
         return {
             "outbound_message_id": outbound_message.id,
@@ -174,18 +200,24 @@ def send_outbound_message(self, outbound_message_id: int):
                 "updated_at",
             ]
         )
+        logger.info(
+            "outbound_message_submitted",
+            extra={
+                "business_id": outbound_message.business_id,
+                "client_id": outbound_message.client_id,
+                "booking_id": outbound_message.booking_id,
+                "outbound_message_id": outbound_message.id,
+                "channel": outbound_message.channel,
+                "provider_message_id": outbound_message.provider_message_id,
+                "status": outbound_message.status,
+            },
+        )
         sync_booking_delivery_marker(outbound_message)
     else:
-        outbound_message.status = OutboundMessage.Status.FAILED
-        outbound_message.save(
-            update_fields=[
-                "provider_message_id",
-                "provider_response",
-                "error_code",
-                "last_error",
-                "status",
-                "updated_at",
-            ]
+        mark_outbound_as_failed(
+            outbound_message,
+            error_code=outbound_message.error_code or "provider_rejected",
+            error_message=outbound_message.last_error or "Provider rejected the message.",
         )
 
     return {

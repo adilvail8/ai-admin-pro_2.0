@@ -78,7 +78,14 @@ class ConversationMessageAdmin(admin.ModelAdmin):
 
 @admin.register(InboundEvent)
 class InboundEventAdmin(admin.ModelAdmin):
-    list_display = ("id", "business", "channel", "provider_event_id", "status", "received_at")
+    list_display = (
+        "id",
+        "business",
+        "channel",
+        "provider_event_id",
+        "status",
+        "received_at",
+    )
     list_filter = ("business", "channel", "status")
     search_fields = ("provider_event_id",)
 
@@ -90,8 +97,12 @@ class OutboundMessageAdmin(admin.ModelAdmin):
         "business",
         "client",
         "channel",
+        "recipient",
         "message_type",
         "status",
+        "attempts",
+        "error_code",
+        "provider_message_id",
         "submitted_at",
         "delivered_at",
     )

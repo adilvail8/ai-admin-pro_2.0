@@ -1,12 +1,15 @@
 import json
 from hashlib import sha256
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
+from django.db import connection
 from django.http import JsonResponse
+from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
-from .models import ConversationMessage
+from .models import ConversationMessage, OutboundMessage
 from .webhooks import (
     get_business,
     get_or_create_client,
@@ -89,6 +92,14 @@ def process_webhook_request(*, payload: dict, request, channel: str):
         raise
 
 
+def verify_outbound_callback_token(token: str):
+    expected_token = settings.OUTBOUND_CALLBACK_SECRET
+    if not expected_token:
+        raise ValidationError("Outbound callback secret is not configured.")
+    if token != expected_token:
+        raise ValidationError("Invalid outbound callback secret.")
+
+
 @csrf_exempt
 @require_POST
 def messenger_webhook(request):
@@ -153,3 +164,59 @@ def green_api_webhook(request):
         )
     except (KeyError, ValueError, ValidationError, json.JSONDecodeError) as error:
         return JsonResponse({"detail": str(error)}, status=400)
+
+
+@csrf_exempt
+@require_POST
+def outbound_delivery_webhook(request):
+    try:
+        verify_outbound_callback_token(
+            request.headers.get("X-Outbound-Callback-Secret", "")
+        )
+    except ValidationError as error:
+        return JsonResponse({"detail": str(error)}, status=403)
+
+    try:
+        payload = parse_request_payload(request)
+        provider_message_id = str(payload["provider_message_id"]).strip()
+        delivery_status = str(payload["status"]).strip().lower()
+        outbound_message = OutboundMessage.objects.get(
+            provider_message_id=provider_message_id
+        )
+        if delivery_status == "delivered":
+            outbound_message.status = OutboundMessage.Status.DELIVERED
+            outbound_message.delivered_at = outbound_message.delivered_at or timezone.now()
+            outbound_message.provider_response = {
+                **outbound_message.provider_response,
+                "delivery_callback": payload,
+            }
+            outbound_message.save(
+                update_fields=["status", "delivered_at", "provider_response", "updated_at"]
+            )
+        return JsonResponse(
+            {
+                "outbound_message_id": outbound_message.id,
+                "status": outbound_message.status,
+            },
+            status=200,
+        )
+    except (KeyError, ValueError, ValidationError, json.JSONDecodeError, OutboundMessage.DoesNotExist) as error:
+        return JsonResponse({"detail": str(error)}, status=400)
+
+
+def healthcheck(request):
+    db_ok = True
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+    except Exception:
+        db_ok = False
+
+    checks = {
+        "database": "ok" if db_ok else "failed",
+        "broker_configured": "ok" if settings.CELERY_BROKER_URL else "failed",
+        "openai_configured": "ok" if settings.OPENAI_API_KEY else "degraded",
+    }
+    overall_status = "ok" if checks["database"] == "ok" else "failed"
+    return JsonResponse({"status": overall_status, "checks": checks}, status=200 if db_ok else 503)

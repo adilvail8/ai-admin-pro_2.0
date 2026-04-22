@@ -449,6 +449,56 @@ def test_outbound_message_is_not_marked_submitted_when_transport_fails(
 
 
 @pytest.mark.django_db
+@override_settings(MAX_OUTBOUND_ATTEMPTS=1)
+def test_outbound_message_moves_to_dead_letter_after_retry_limit(
+    business,
+    client_profile,
+    master,
+    service,
+    monkeypatch,
+):
+    class FailingTransport:
+        def send_text(self, *, recipient, text, metadata=None):
+            return type(
+                "Result",
+                (),
+                {
+                    "accepted": False,
+                    "delivered": False,
+                    "provider_message_id": None,
+                    "raw_response": {"ok": False},
+                    "error_code": "provider_down",
+                    "error_message": "Provider is unavailable",
+                },
+            )()
+
+    monkeypatch.setattr(
+        "apps.bookings.tasks.get_transport_for_channel",
+        lambda channel: FailingTransport(),
+    )
+
+    booking = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(hours=1, minutes=50),
+        client_data={"name": client_profile.name},
+        status=Booking.Status.CONFIRMED,
+    )
+
+    result = send_booking_reminder.run(booking.id)
+    outbound_message = OutboundMessage.objects.get(
+        booking=booking,
+        message_type="reminder",
+    )
+
+    assert result["status"] == OutboundMessage.Status.DEAD_LETTER
+    assert outbound_message.dead_lettered_at is not None
+    assert booking.reminder_sent_at is None
+
+
+@pytest.mark.django_db
 def test_notify_human_operator_reports_delivery_status(
     business,
     client_profile,
@@ -478,6 +528,53 @@ def test_notify_human_operator_reports_delivery_status(
 
     assert result["notification_status"] == OutboundMessage.Status.SUBMITTED
     assert outbound_message.provider_message_id
+
+
+@pytest.mark.django_db
+@override_settings(OUTBOUND_CALLBACK_SECRET="callback-secret")
+def test_outbound_delivery_webhook_marks_message_as_delivered(
+    client,
+    business,
+    client_profile,
+):
+    outbound_message = OutboundMessage.objects.create(
+        business=business,
+        client=client_profile,
+        channel="whatsapp",
+        recipient=client_profile.whatsapp_id or str(client_profile.phone),
+        message_type="reminder",
+        text="Reminder",
+        status=OutboundMessage.Status.SUBMITTED,
+        provider_message_id="provider-123",
+        provider_response={"accepted": True},
+        submitted_at=timezone.now(),
+    )
+
+    response = client.post(
+        "/api/webhooks/outbound-delivery/",
+        data=json.dumps(
+            {
+                "provider_message_id": "provider-123",
+                "status": "delivered",
+            }
+        ),
+        content_type="application/json",
+        HTTP_X_OUTBOUND_CALLBACK_SECRET="callback-secret",
+    )
+
+    outbound_message.refresh_from_db()
+
+    assert response.status_code == 200
+    assert outbound_message.status == OutboundMessage.Status.DELIVERED
+    assert outbound_message.delivered_at is not None
+
+
+@pytest.mark.django_db
+def test_healthcheck_returns_ok(client):
+    response = client.get("/api/health/")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
 
 
 @pytest.mark.django_db

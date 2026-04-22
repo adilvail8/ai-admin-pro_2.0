@@ -412,6 +412,7 @@ class OutboundMessage(TimeStampedModel):
         SUBMITTED = "submitted", _("Submitted")
         DELIVERED = "delivered", _("Delivered")
         FAILED = "failed", _("Failed")
+        DEAD_LETTER = "dead_letter", _("Dead letter")
 
     business = models.ForeignKey(
         Business,
@@ -448,6 +449,7 @@ class OutboundMessage(TimeStampedModel):
     last_error = models.TextField(blank=True, default="")
     submitted_at = models.DateTimeField(null=True, blank=True)
     delivered_at = models.DateTimeField(null=True, blank=True)
+    dead_lettered_at = models.DateTimeField(null=True, blank=True)
 
 
 class ConversationMessage(TimeStampedModel):
