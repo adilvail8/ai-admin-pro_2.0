@@ -5,6 +5,7 @@ DEBUG = False
 PASSWORD_HASHERS = [
     "django.contrib.auth.hashers.MD5PasswordHasher",
 ]
+SECRET_KEY = "test-secret-key-for-jwt-signing-with-safe-length-1234567890"
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
@@ -12,6 +13,3 @@ DATABASES = {
     }
 }
 CELERY_TASK_ALWAYS_EAGER = True
-MIGRATION_MODULES = {
-    "bookings": None,
-}

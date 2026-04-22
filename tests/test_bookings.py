@@ -3,11 +3,13 @@ from datetime import time, timedelta
 from decimal import Decimal
 
 import pytest
+from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import override_settings
 from django.utils import timezone
 
+from apps.accounts.models import BusinessMembership
 from apps.bookings.ai_manager import AIManager, AI_RETRY_MESSAGE, SYSTEM_PROMPT
 from apps.bookings.client_identity import ClientIdentityResolver
 from apps.bookings.models import (
@@ -42,6 +44,9 @@ from apps.bookings.webhooks import (
 )
 
 
+User = get_user_model()
+
+
 @pytest.fixture
 def business():
     return Business.objects.create(
@@ -55,6 +60,24 @@ def business():
             "tone": "Care & Professionalism",
             "rules": ["Всегда подтверждай детали записи."],
         },
+    )
+
+
+@pytest.fixture
+def owner_user():
+    return User.objects.create_user(
+        username="owner",
+        password="StrongPass123!",
+        email="owner@example.com",
+    )
+
+
+@pytest.fixture
+def business_membership(owner_user, business):
+    return BusinessMembership.objects.create(
+        user=owner_user,
+        business=business,
+        role=BusinessMembership.Role.OWNER,
     )
 
 
@@ -796,6 +819,66 @@ def test_healthcheck_returns_ok(client):
 
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
+
+
+@pytest.mark.django_db
+def test_jwt_token_obtain_and_me_endpoint(client, owner_user, business_membership):
+    token_response = client.post(
+        "/api/v1/auth/token/",
+        data=json.dumps(
+            {"username": "owner", "password": "StrongPass123!"}
+        ),
+        content_type="application/json",
+    )
+
+    assert token_response.status_code == 200
+    access_token = token_response.json()["access"]
+
+    me_response = client.get(
+        "/api/v1/auth/me/",
+        HTTP_AUTHORIZATION=f"Bearer {access_token}",
+    )
+
+    assert me_response.status_code == 200
+    assert me_response.json()["username"] == "owner"
+
+
+@pytest.mark.django_db
+def test_bookings_api_is_scoped_by_business_membership(
+    client,
+    owner_user,
+    business,
+    business_membership,
+    client_profile,
+    master,
+    service,
+):
+    booking = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(days=1),
+        client_data={"name": client_profile.name},
+        status=Booking.Status.CONFIRMED,
+    )
+
+    token_response = client.post(
+        "/api/v1/auth/token/",
+        data=json.dumps(
+            {"username": "owner", "password": "StrongPass123!"}
+        ),
+        content_type="application/json",
+    )
+    access_token = token_response.json()["access"]
+
+    bookings_response = client.get(
+        "/api/v1/bookings/",
+        HTTP_AUTHORIZATION=f"Bearer {access_token}",
+    )
+
+    assert bookings_response.status_code == 200
+    assert bookings_response.json()[0]["id"] == booking.id
 
 
 @pytest.mark.django_db

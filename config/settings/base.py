@@ -14,7 +14,10 @@ env = environ.Env(
 environ.Env.read_env(BASE_DIR / ".env")
 
 
-SECRET_KEY = env("DJANGO_SECRET_KEY", default="unsafe-dev-secret")
+SECRET_KEY = env(
+    "DJANGO_SECRET_KEY",
+    default="unsafe-dev-secret-key-for-local-jwt-signing-please-change",
+)
 DEBUG = env("DEBUG")
 ALLOWED_HOSTS = env("ALLOWED_HOSTS")
 CSRF_TRUSTED_ORIGINS = env("CSRF_TRUSTED_ORIGINS")
@@ -27,7 +30,11 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "django.contrib.postgres",
+    "rest_framework",
+    "rest_framework_simplejwt",
     "phonenumber_field",
+    "apps.accounts",
+    "apps.api",
     "apps.bookings",
 ]
 
@@ -125,3 +132,23 @@ OUTBOUND_TRANSPORT_TIMEOUT_SECONDS = env.int(
     "OUTBOUND_TRANSPORT_TIMEOUT_SECONDS",
     default=10,
 )
+API_USER_RATE = env("API_USER_RATE", default="60/minute")
+API_ANON_RATE = env("API_ANON_RATE", default="10/minute")
+
+REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": (
+        "rest_framework_simplejwt.authentication.JWTAuthentication",
+        "rest_framework.authentication.SessionAuthentication",
+    ),
+    "DEFAULT_PERMISSION_CLASSES": (
+        "rest_framework.permissions.IsAuthenticated",
+    ),
+    "DEFAULT_THROTTLE_CLASSES": (
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ),
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": API_ANON_RATE,
+        "user": API_USER_RATE,
+    },
+}
