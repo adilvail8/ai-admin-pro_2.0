@@ -1,15 +1,33 @@
 import json
 from datetime import time, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
+from django.contrib.auth.models import AnonymousUser
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError, transaction
+from django.http import Http404
 from django.test import override_settings
 from django.utils import timezone
+from rest_framework.permissions import AllowAny
+from rest_framework.test import APIRequestFactory
+from rest_framework.views import APIView
 
+from apps.api.mixins import BusinessContextMixin, BusinessScopedQuerysetMixin
+from apps.api.permissions import (
+    ROLE_HIERARCHY,
+    BusinessAccessPermission,
+    _roles_gte,
+)
+from apps.api.serializers import (
+    BookingCreateSerializer,
+    BookingReadSerializer,
+    BookingRescheduleSerializer,
+    BookingStatusUpdateSerializer,
+)
 from apps.accounts.models import BusinessMembership
 from apps.bookings.ai_manager import AIManager, AI_RETRY_MESSAGE, SYSTEM_PROMPT
 from apps.bookings.client_identity import ClientIdentityResolver
@@ -303,10 +321,10 @@ def test_create_appointment_persists_booking_for_business_id(
 ):
     start_time = timezone.now() + timedelta(days=2)
     booking = create_appointment(
-        business.id,
-        master_id=master.id,
-        service_id=service.id,
-        client_id=client_profile.id,
+        business=business,
+        master=master,
+        service=service,
+        client=client_profile,
         start_time=start_time,
         client_data={"name": "Olga", "phone": "+77000000000"},
         status=Booking.Status.CONFIRMED,
@@ -331,12 +349,15 @@ def test_create_appointment_rejects_cross_tenant_client(
         phone="+77070000001",
     )
 
-    with pytest.raises(Client.DoesNotExist):
+    with pytest.raises(
+        ValidationError,
+        match="Client does not belong to the selected business",
+    ):
         create_appointment(
-            business.id,
-            master_id=master.id,
-            service_id=service.id,
-            client_id=foreign_client.id,
+            business=business,
+            master=master,
+            service=service,
+            client=foreign_client,
             start_time=timezone.now() + timedelta(days=2),
             client_data={"name": "Olga"},
         )
@@ -467,10 +488,10 @@ def test_create_appointment_rejects_past_time_explicitly(
 ):
     with pytest.raises(ValidationError):
         create_appointment(
-            business.id,
-            master_id=master.id,
-            service_id=service.id,
-            client_id=client_profile.id,
+            business=business,
+            master=master,
+            service=service,
+            client=client_profile,
             start_time=timezone.now() - timedelta(minutes=5),
             client_data={"name": "Late client"},
         )
@@ -484,10 +505,10 @@ def test_create_appointment_writes_audit_log(
     service,
 ):
     booking = create_appointment(
-        business.id,
-        master_id=master.id,
-        service_id=service.id,
-        client_id=client_profile.id,
+        business=business,
+        master=master,
+        service=service,
+        client=client_profile,
         start_time=timezone.now() + timedelta(days=2),
         client_data={"name": "Olga"},
     )
@@ -1088,6 +1109,582 @@ def test_jwt_token_obtain_and_me_endpoint(client, owner_user, business_membershi
 
 
 @pytest.mark.django_db
+def test_roles_gte_returns_expected_hierarchy():
+    assert ROLE_HIERARCHY == {
+        BusinessMembership.Role.STAFF: 0,
+        BusinessMembership.Role.ADMIN: 1,
+        BusinessMembership.Role.OWNER: 2,
+    }
+    assert _roles_gte(BusinessMembership.Role.STAFF) == [
+        BusinessMembership.Role.STAFF,
+        BusinessMembership.Role.ADMIN,
+        BusinessMembership.Role.OWNER,
+    ]
+    assert _roles_gte(BusinessMembership.Role.ADMIN) == [
+        BusinessMembership.Role.ADMIN,
+        BusinessMembership.Role.OWNER,
+    ]
+    assert _roles_gte(BusinessMembership.Role.OWNER) == [
+        BusinessMembership.Role.OWNER,
+    ]
+
+
+@pytest.mark.django_db
+def test_business_access_permission_factory_rejects_unknown_role():
+    with pytest.raises(ValueError, match="Unknown business role"):
+        BusinessAccessPermission("super_admin")
+
+
+@pytest.mark.django_db
+def test_business_access_permission_checks_membership_and_role(
+    owner_user,
+    business,
+    business_membership,
+):
+    request = APIRequestFactory().get("/api/v1/businesses/1/bookings/")
+    request.user = owner_user
+    view = SimpleNamespace(business=business)
+
+    assert BusinessAccessPermission(BusinessMembership.Role.STAFF)().has_permission(
+        request,
+        view,
+    )
+    assert BusinessAccessPermission(BusinessMembership.Role.ADMIN)().has_permission(
+        request,
+        view,
+    )
+    assert BusinessAccessPermission(BusinessMembership.Role.OWNER)().has_permission(
+        request,
+        view,
+    )
+
+
+@pytest.mark.django_db
+def test_business_access_permission_denies_without_business_context(
+    owner_user,
+):
+    request = APIRequestFactory().get("/api/v1/bookings/")
+    request.user = owner_user
+    view = SimpleNamespace(business=None)
+
+    assert not BusinessAccessPermission()().has_permission(request, view)
+
+
+@pytest.mark.django_db
+def test_business_access_permission_denies_unauthenticated_request(
+    business,
+):
+    request = APIRequestFactory().get("/api/v1/businesses/1/bookings/")
+    request.user = AnonymousUser()
+    view = SimpleNamespace(business=business)
+
+    assert not BusinessAccessPermission()().has_permission(request, view)
+
+
+@pytest.mark.django_db
+def test_business_access_permission_checks_object_business_id(
+    owner_user,
+    business,
+    business_membership,
+    another_business,
+):
+    request = APIRequestFactory().get("/api/v1/businesses/1/bookings/1/")
+    request.user = owner_user
+    view = SimpleNamespace(business=business)
+
+    assert BusinessAccessPermission()().has_object_permission(
+        request,
+        view,
+        SimpleNamespace(business_id=business.id),
+    )
+    assert not BusinessAccessPermission()().has_object_permission(
+        request,
+        view,
+        SimpleNamespace(business_id=another_business.id),
+    )
+
+
+@pytest.mark.django_db
+def test_business_access_permission_uses_view_object_business_id_adapter(
+    owner_user,
+    business,
+    business_membership,
+    another_business,
+):
+    request = APIRequestFactory().get("/api/v1/businesses/1/outbound/1/")
+    request.user = owner_user
+
+    class StubView:
+        def __init__(self, business):
+            self.business = business
+
+        @staticmethod
+        def get_object_business_id(obj):
+            return obj.target_business_id
+
+    view = StubView(business)
+
+    assert BusinessAccessPermission()().has_object_permission(
+        request,
+        view,
+        SimpleNamespace(target_business_id=business.id),
+    )
+    assert not BusinessAccessPermission()().has_object_permission(
+        request,
+        view,
+        SimpleNamespace(target_business_id=another_business.id),
+    )
+
+
+@pytest.mark.django_db
+def test_business_context_mixin_resolves_business_before_permissions(
+    owner_user,
+    business,
+):
+    class StubView(BusinessContextMixin, APIView):
+        permission_classes = [AllowAny]
+
+    django_request = APIRequestFactory().get(
+        f"/api/v1/businesses/{business.id}/bookings/"
+    )
+    django_request.user = owner_user
+
+    view = StubView()
+    request = view.initialize_request(django_request)
+    view.request = request
+    view.args = ()
+    view.kwargs = {"business_id": business.id}
+
+    view.initial(request)
+
+    assert view.business == business
+
+
+@pytest.mark.django_db
+def test_business_context_mixin_skips_resolution_for_unauthenticated_request():
+    class StubView(BusinessContextMixin, APIView):
+        permission_classes = [AllowAny]
+
+        def resolve_business(self):
+            raise AssertionError("resolve_business should not be called")
+
+    django_request = APIRequestFactory().get("/api/v1/businesses/1/bookings/")
+    django_request.user = AnonymousUser()
+
+    view = StubView()
+    request = view.initialize_request(django_request)
+    view.request = request
+    view.args = ()
+    view.kwargs = {"business_id": 1}
+
+    view.initial(request)
+
+    assert view.business is None
+
+
+@pytest.mark.django_db
+def test_business_context_mixin_requires_business_scope_in_url(
+    owner_user,
+):
+    class StubView(BusinessContextMixin, APIView):
+        permission_classes = [AllowAny]
+
+    django_request = APIRequestFactory().get("/api/v1/bookings/")
+    django_request.user = owner_user
+
+    view = StubView()
+    request = view.initialize_request(django_request)
+    view.request = request
+    view.args = ()
+    view.kwargs = {}
+
+    with pytest.raises(Http404, match="Business scope is required"):
+        view.initial(request)
+
+
+@pytest.mark.django_db
+def test_business_scoped_queryset_mixin_uses_queryset_attribute(
+    business,
+    another_business,
+    client_profile,
+    master,
+    service,
+):
+    foreign_client = Client.objects.create(
+        business=another_business,
+        name="Foreign client",
+        phone="+77070000009",
+    )
+    foreign_master = Master.objects.create(
+        business=another_business,
+        full_name="Foreign master",
+        specialization="Foreign",
+        working_hours=master.working_hours,
+    )
+    foreign_service = Service.objects.create(
+        business=another_business,
+        name="Foreign service",
+        price=Decimal("50.00"),
+        duration=timedelta(minutes=30),
+    )
+    booking = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(days=1),
+        client_data={"name": client_profile.name},
+    )
+    Booking.objects.create(
+        business=another_business,
+        client=foreign_client,
+        master=foreign_master,
+        service=foreign_service,
+        start_time=timezone.now() + timedelta(days=1, hours=1),
+        client_data={"name": foreign_client.name},
+    )
+
+    class StubView(BusinessScopedQuerysetMixin):
+        queryset = Booking.objects.select_related(
+            "business",
+            "client",
+            "master",
+            "service",
+        )
+
+    view = StubView()
+    view.business = business
+
+    queryset = view.get_queryset()
+
+    assert list(queryset) == [booking]
+    assert queryset.query.select_related
+
+
+@pytest.mark.django_db
+def test_booking_read_serializer_uses_explicit_id_fields(
+    business,
+    client_profile,
+    master,
+    service,
+):
+    booking = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(days=1),
+        client_data={"name": client_profile.name},
+        notes="Need a reminder",
+    )
+
+    payload = BookingReadSerializer(booking).data
+
+    assert payload["business_id"] == business.id
+    assert payload["client_id"] == client_profile.id
+    assert payload["master_id"] == master.id
+    assert payload["service_id"] == service.id
+    assert "business" not in payload
+    assert "client" not in payload
+    assert "master" not in payload
+    assert "service" not in payload
+
+
+@pytest.mark.django_db
+def test_booking_create_serializer_scopes_related_fields_to_business(
+    business,
+    client_profile,
+    master,
+    service,
+):
+    serializer = BookingCreateSerializer(
+        context={"business": business},
+    )
+
+    assert list(serializer.fields["client"].queryset) == [client_profile]
+    assert list(serializer.fields["master"].queryset) == [master]
+    assert list(serializer.fields["service"].queryset) == [service]
+
+
+@pytest.mark.django_db
+def test_booking_create_serializer_rejects_foreign_master(
+    business,
+    client_profile,
+    service,
+    another_business,
+):
+    foreign_master = Master.objects.create(
+        business=another_business,
+        full_name="Foreign master",
+        specialization="Foreign",
+        working_hours={"mon": {"start": "09:00", "end": "18:00"}},
+    )
+
+    serializer = BookingCreateSerializer(
+        data={
+            "client": client_profile.id,
+            "master": foreign_master.id,
+            "service": service.id,
+            "start_time": (timezone.now() + timedelta(days=1)).isoformat(),
+        },
+        context={"business": business},
+    )
+
+    assert not serializer.is_valid()
+    assert "master" in serializer.errors
+
+
+@pytest.mark.django_db
+def test_booking_create_serializer_ignores_business_from_payload(
+    business,
+    client_profile,
+    master,
+    service,
+    another_business,
+):
+    serializer = BookingCreateSerializer(
+        data={
+            "business": another_business.id,
+            "client": client_profile.id,
+            "master": master.id,
+            "service": service.id,
+            "start_time": (timezone.now() + timedelta(days=1)).isoformat(),
+        },
+        context={"business": business},
+    )
+
+    assert serializer.is_valid(), serializer.errors
+    assert "business" not in serializer.validated_data
+
+
+@pytest.mark.django_db
+def test_booking_create_serializer_uses_business_from_context(
+    business,
+    client_profile,
+    master,
+    service,
+    another_business,
+    monkeypatch,
+):
+    captured_call = {}
+
+    def fake_create_appointment(
+        *,
+        business,
+        client,
+        master,
+        service,
+        start_time,
+        client_data,
+        status,
+        notes,
+    ):
+        captured_call.update(
+            {
+                "business": business,
+                "client": client,
+                "master": master,
+                "service": service,
+                "start_time": start_time,
+                "client_data": client_data,
+                "status": status,
+                "notes": notes,
+            }
+        )
+        return Booking.objects.create(
+            business=business,
+            client=client_profile,
+            master=master,
+            service=service,
+            start_time=start_time,
+            client_data=client_data,
+            status=status,
+            notes=notes,
+        )
+
+    monkeypatch.setattr(
+        "apps.api.serializers.create_appointment",
+        fake_create_appointment,
+    )
+
+    serializer = BookingCreateSerializer(
+        data={
+            "business": another_business.id,
+            "client": client_profile.id,
+            "master": master.id,
+            "service": service.id,
+            "start_time": (timezone.now() + timedelta(days=1)).isoformat(),
+            "client_data": {"name": client_profile.name},
+            "notes": "Window seat",
+        },
+        context={"business": business},
+    )
+
+    assert serializer.is_valid(), serializer.errors
+    booking = serializer.save()
+
+    assert captured_call["business"] == business
+    assert captured_call["client"] == client_profile
+    assert captured_call["master"] == master
+    assert captured_call["service"] == service
+    assert captured_call["notes"] == "Window seat"
+    assert booking.notes == "Window seat"
+
+
+@pytest.mark.django_db
+def test_booking_reschedule_serializer_scopes_master_queryset_to_business(
+    business,
+    master,
+):
+    serializer = BookingRescheduleSerializer(context={"business": business})
+
+    assert list(serializer.fields["master"].queryset) == [master]
+
+
+@pytest.mark.django_db
+def test_booking_reschedule_serializer_rejects_foreign_master(
+    business,
+    client_profile,
+    master,
+    service,
+    another_business,
+):
+    foreign_master = Master.objects.create(
+        business=another_business,
+        full_name="Foreign master",
+        specialization="Foreign",
+        working_hours={"mon": {"start": "09:00", "end": "18:00"}},
+    )
+    booking = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(days=1),
+        client_data={"name": client_profile.name},
+    )
+
+    serializer = BookingRescheduleSerializer(
+        instance=booking,
+        data={
+            "master": foreign_master.id,
+            "start_time": (timezone.now() + timedelta(days=2)).isoformat(),
+        },
+        context={"business": business},
+        partial=True,
+    )
+
+    assert not serializer.is_valid()
+    assert "master" in serializer.errors
+
+
+@pytest.mark.django_db
+def test_booking_reschedule_serializer_uses_business_from_context(
+    business,
+    client_profile,
+    master,
+    service,
+    monkeypatch,
+):
+    booking = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(days=1),
+        client_data={"name": client_profile.name},
+    )
+    captured_call = {}
+    new_start_time = timezone.now() + timedelta(days=2)
+
+    def fake_reschedule_appointment(*, booking, business, master, start_time):
+        captured_call.update(
+            {
+                "booking": booking,
+                "business": business,
+                "master": master,
+                "start_time": start_time,
+            }
+        )
+        booking.start_time = start_time
+        return booking
+
+    monkeypatch.setattr(
+        "apps.api.serializers.reschedule_appointment",
+        fake_reschedule_appointment,
+    )
+
+    serializer = BookingRescheduleSerializer(
+        instance=booking,
+        data={
+            "master": master.id,
+            "start_time": new_start_time.isoformat(),
+        },
+        context={"business": business},
+        partial=True,
+    )
+
+    assert serializer.is_valid(), serializer.errors
+    updated_booking = serializer.save()
+
+    assert captured_call["booking"] == booking
+    assert captured_call["business"] == business
+    assert captured_call["master"] == master
+    assert captured_call["start_time"] == serializer.validated_data["start_time"]
+    assert updated_booking.start_time == serializer.validated_data["start_time"]
+
+
+@pytest.mark.django_db
+def test_booking_status_update_serializer_uses_business_from_context(
+    business,
+    client_profile,
+    master,
+    service,
+    monkeypatch,
+):
+    booking = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(days=1),
+        client_data={"name": client_profile.name},
+    )
+    captured_call = {}
+
+    def fake_update_booking_status(*, booking, business, status):
+        captured_call.update(
+            {
+                "booking": booking,
+                "business": business,
+                "status": status,
+            }
+        )
+        booking.status = status
+        return booking
+
+    monkeypatch.setattr(
+        "apps.api.serializers.update_booking_status",
+        fake_update_booking_status,
+    )
+
+    serializer = BookingStatusUpdateSerializer(
+        instance=booking,
+        data={"status": Booking.Status.CONFIRMED},
+        context={"business": business},
+        partial=True,
+    )
+
+    assert serializer.is_valid(), serializer.errors
+    updated_booking = serializer.save()
+
+    assert captured_call["booking"] == booking
+    assert captured_call["business"] == business
+    assert captured_call["status"] == Booking.Status.CONFIRMED
+    assert updated_booking.status == Booking.Status.CONFIRMED
+
+
+@pytest.mark.django_db
 def test_bookings_api_is_scoped_by_business_membership(
     client,
     owner_user,
@@ -1117,12 +1714,315 @@ def test_bookings_api_is_scoped_by_business_membership(
     access_token = token_response.json()["access"]
 
     bookings_response = client.get(
-        "/api/v1/bookings/",
+        f"/api/v1/businesses/{business.id}/bookings/",
         HTTP_AUTHORIZATION=f"Bearer {access_token}",
     )
 
     assert bookings_response.status_code == 200
     assert bookings_response.json()[0]["id"] == booking.id
+
+
+@pytest.mark.django_db
+def test_bookings_api_denies_access_to_foreign_business_scope(
+    client,
+    owner_user,
+    business_membership,
+    another_business,
+):
+    token_response = client.post(
+        "/api/v1/auth/token/",
+        data=json.dumps(
+            {"username": "owner", "password": "StrongPass123!"}
+        ),
+        content_type="application/json",
+    )
+    access_token = token_response.json()["access"]
+
+    response = client.get(
+        f"/api/v1/businesses/{another_business.id}/bookings/",
+        HTTP_AUTHORIZATION=f"Bearer {access_token}",
+    )
+
+    assert response.status_code == 403
+
+
+@pytest.mark.django_db
+def test_bookings_api_creates_booking_in_business_scope(
+    client,
+    owner_user,
+    business,
+    business_membership,
+    client_profile,
+    master,
+    service,
+):
+    token_response = client.post(
+        "/api/v1/auth/token/",
+        data=json.dumps(
+            {"username": "owner", "password": "StrongPass123!"}
+        ),
+        content_type="application/json",
+    )
+    access_token = token_response.json()["access"]
+    start_time = timezone.now() + timedelta(days=1)
+
+    response = client.post(
+        f"/api/v1/businesses/{business.id}/bookings/",
+        data=json.dumps(
+            {
+                "business": 999999,
+                "client": client_profile.id,
+                "master": master.id,
+                "service": service.id,
+                "start_time": start_time.isoformat(),
+                "client_data": {"name": client_profile.name},
+                "notes": "Window seat",
+            }
+        ),
+        content_type="application/json",
+        HTTP_AUTHORIZATION=f"Bearer {access_token}",
+    )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["business_id"] == business.id
+    assert payload["client_id"] == client_profile.id
+    assert payload["master_id"] == master.id
+    assert payload["service_id"] == service.id
+    assert payload["notes"] == "Window seat"
+
+
+@pytest.mark.django_db
+def test_booking_detail_api_returns_booking_within_business_scope(
+    client,
+    owner_user,
+    business,
+    business_membership,
+    client_profile,
+    master,
+    service,
+):
+    booking = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(days=1),
+        client_data={"name": client_profile.name},
+        notes="Detail test",
+    )
+    token_response = client.post(
+        "/api/v1/auth/token/",
+        data=json.dumps(
+            {"username": "owner", "password": "StrongPass123!"}
+        ),
+        content_type="application/json",
+    )
+    access_token = token_response.json()["access"]
+
+    response = client.get(
+        f"/api/v1/businesses/{business.id}/bookings/{booking.id}/",
+        HTTP_AUTHORIZATION=f"Bearer {access_token}",
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == booking.id
+    assert response.json()["notes"] == "Detail test"
+
+
+@pytest.mark.django_db
+def test_booking_detail_api_returns_404_for_foreign_booking_pk_in_same_scope(
+    client,
+    owner_user,
+    business,
+    business_membership,
+    another_business,
+):
+    foreign_client = Client.objects.create(
+        business=another_business,
+        name="Foreign client",
+        phone="+77070000011",
+    )
+    foreign_master = Master.objects.create(
+        business=another_business,
+        full_name="Foreign master",
+        specialization="Foreign",
+        working_hours={"mon": {"start": "09:00", "end": "18:00"}},
+    )
+    foreign_service = Service.objects.create(
+        business=another_business,
+        name="Foreign service",
+        price=Decimal("50.00"),
+        duration=timedelta(minutes=30),
+    )
+    foreign_booking = Booking.objects.create(
+        business=another_business,
+        client=foreign_client,
+        master=foreign_master,
+        service=foreign_service,
+        start_time=timezone.now() + timedelta(days=1),
+        client_data={"name": foreign_client.name},
+    )
+    token_response = client.post(
+        "/api/v1/auth/token/",
+        data=json.dumps(
+            {"username": "owner", "password": "StrongPass123!"}
+        ),
+        content_type="application/json",
+    )
+    access_token = token_response.json()["access"]
+
+    response = client.get(
+        f"/api/v1/businesses/{business.id}/bookings/{foreign_booking.id}/",
+        HTTP_AUTHORIZATION=f"Bearer {access_token}",
+    )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.django_db
+def test_booking_reschedule_api_updates_booking_within_business_scope(
+    client,
+    owner_user,
+    business,
+    business_membership,
+    client_profile,
+    master,
+    service,
+):
+    booking = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(days=1),
+        client_data={"name": client_profile.name},
+    )
+    token_response = client.post(
+        "/api/v1/auth/token/",
+        data=json.dumps(
+            {"username": "owner", "password": "StrongPass123!"}
+        ),
+        content_type="application/json",
+    )
+    access_token = token_response.json()["access"]
+    new_start_time = timezone.now() + timedelta(days=2)
+
+    response = client.patch(
+        f"/api/v1/businesses/{business.id}/bookings/{booking.id}/reschedule/",
+        data=json.dumps(
+            {
+                "master": master.id,
+                "start_time": new_start_time.isoformat(),
+            }
+        ),
+        content_type="application/json",
+        HTTP_AUTHORIZATION=f"Bearer {access_token}",
+    )
+
+    booking.refresh_from_db()
+
+    assert response.status_code == 200
+    assert timezone.localtime(booking.start_time).isoformat() == response.json()["start_time"]
+    assert booking.master_id == master.id
+
+
+@pytest.mark.django_db
+def test_booking_status_api_updates_status_within_business_scope(
+    client,
+    owner_user,
+    business,
+    business_membership,
+    client_profile,
+    master,
+    service,
+):
+    booking = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(days=1),
+        client_data={"name": client_profile.name},
+        status=Booking.Status.PENDING,
+    )
+    token_response = client.post(
+        "/api/v1/auth/token/",
+        data=json.dumps(
+            {"username": "owner", "password": "StrongPass123!"}
+        ),
+        content_type="application/json",
+    )
+    access_token = token_response.json()["access"]
+
+    response = client.patch(
+        f"/api/v1/businesses/{business.id}/bookings/{booking.id}/status/",
+        data=json.dumps({"status": Booking.Status.CONFIRMED}),
+        content_type="application/json",
+        HTTP_AUTHORIZATION=f"Bearer {access_token}",
+    )
+
+    booking.refresh_from_db()
+
+    assert response.status_code == 200
+    assert booking.status == Booking.Status.CONFIRMED
+    assert response.json()["status"] == Booking.Status.CONFIRMED
+
+
+@pytest.mark.django_db
+def test_booking_reschedule_api_returns_404_for_foreign_booking_pk_in_same_scope(
+    client,
+    owner_user,
+    business,
+    business_membership,
+    another_business,
+):
+    foreign_client = Client.objects.create(
+        business=another_business,
+        name="Foreign client",
+        phone="+77070000012",
+    )
+    foreign_master = Master.objects.create(
+        business=another_business,
+        full_name="Foreign master",
+        specialization="Foreign",
+        working_hours={"mon": {"start": "09:00", "end": "18:00"}},
+    )
+    foreign_service = Service.objects.create(
+        business=another_business,
+        name="Foreign service",
+        price=Decimal("50.00"),
+        duration=timedelta(minutes=30),
+    )
+    foreign_booking = Booking.objects.create(
+        business=another_business,
+        client=foreign_client,
+        master=foreign_master,
+        service=foreign_service,
+        start_time=timezone.now() + timedelta(days=1),
+        client_data={"name": foreign_client.name},
+    )
+    token_response = client.post(
+        "/api/v1/auth/token/",
+        data=json.dumps(
+            {"username": "owner", "password": "StrongPass123!"}
+        ),
+        content_type="application/json",
+    )
+    access_token = token_response.json()["access"]
+
+    response = client.patch(
+        f"/api/v1/businesses/{business.id}/bookings/{foreign_booking.id}/reschedule/",
+        data=json.dumps(
+            {
+                "start_time": (timezone.now() + timedelta(days=2)).isoformat(),
+            }
+        ),
+        content_type="application/json",
+        HTTP_AUTHORIZATION=f"Bearer {access_token}",
+    )
+
+    assert response.status_code == 404
 
 
 @pytest.mark.django_db
@@ -1685,14 +2585,16 @@ def test_service_rejects_category_from_another_business(
         name="Foreign category",
     )
 
+    service = Service(
+        business=business,
+        category=foreign_category,
+        name="Consultation",
+        price=Decimal("10.00"),
+        duration=timedelta(minutes=30),
+    )
+
     with pytest.raises(ValidationError):
-        Service.objects.create(
-            business=business,
-            category=foreign_category,
-            name="Consultation",
-            price=Decimal("10.00"),
-            duration=timedelta(minutes=30),
-        )
+        service.full_clean()
 
 
 @pytest.mark.django_db

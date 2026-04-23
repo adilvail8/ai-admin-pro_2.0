@@ -186,7 +186,7 @@ def schedule_outbound_retry(outbound_message: OutboundMessage):
     eta = timezone.now() + timedelta(minutes=5)
     async_result = send_outbound_message.apply_async(
         args=(outbound_message.id,),
-        countdown=300,
+        eta=eta,
     )
     create_audit_log(
         business=outbound_message.business,
@@ -537,8 +537,7 @@ def process_pending_reminders():
     reminder_threshold = now + timedelta(hours=2)
 
     reminder_ids = list(
-        Booking.objects.select_related("client", "service", "business")
-        .filter(
+        Booking.objects.filter(
             status=Booking.Status.CONFIRMED,
             reminder_sent_at__isnull=True,
             start_time__lte=reminder_threshold,
@@ -548,8 +547,7 @@ def process_pending_reminders():
         .values_list("id", flat=True)
     )
     follow_up_ids = list(
-        Booking.objects.select_related("client", "service", "business")
-        .filter(
+        Booking.objects.filter(
             status=Booking.Status.PENDING,
             follow_up_sent_at__isnull=True,
             created_at__lte=now - timedelta(hours=1),

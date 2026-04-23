@@ -162,14 +162,15 @@ def get_available_slots(
 
 @transaction.atomic
 def create_appointment(
-    business_id: int,
     *,
-    master_id: int,
-    service_id: int,
-    client_id: int,
+    business: Business,
+    master,
+    service,
+    client: Client,
     start_time: datetime,
     client_data: dict,
     status: str = Booking.Status.PENDING,
+    notes: str = "",
 ):
     if timezone.is_naive(start_time):
         raise ValidationError(
@@ -178,13 +179,25 @@ def create_appointment(
     if start_time < timezone.now():
         raise ValidationError("Cannot create a booking in the past.")
 
-    business = Business.objects.get(pk=business_id, is_active=True)
+    if not business.is_active:
+        raise ValidationError("Business is inactive.")
+    if master.business_id != business.id:
+        raise ValidationError("Master does not belong to the selected business.")
+    if service.business_id != business.id:
+        raise ValidationError("Service does not belong to the selected business.")
+    if client.business_id != business.id:
+        raise ValidationError("Client does not belong to the selected business.")
+    if not getattr(master, "is_active", False):
+        raise ValidationError("Master is inactive.")
+    if not getattr(service, "is_active", False):
+        raise ValidationError("Service is inactive.")
+    if not getattr(client, "is_active", False):
+        raise ValidationError("Client is inactive.")
+
     master = business.masters.select_for_update().get(
-        pk=master_id,
+        pk=master.pk,
         is_active=True,
     )
-    service = business.services.get(pk=service_id, is_active=True)
-    client = business.clients.get(pk=client_id, is_active=True)
     validate_business_booking_rules(
         business=business,
         master=master,
@@ -216,6 +229,7 @@ def create_appointment(
         start_time=start_time,
         status=status,
         client_data=client_data,
+        notes=notes,
     )
     booking.full_clean()
     booking.save()
@@ -235,6 +249,96 @@ def create_appointment(
         },
     )
     return booking
+
+
+def validate_booking_business_scope(*, booking: Booking, business: Business):
+    if booking.business_id != business.id:
+        raise ValidationError("Booking does not belong to the selected business.")
+    if not business.is_active:
+        raise ValidationError("Business is inactive.")
+
+
+@transaction.atomic
+def reschedule_appointment(
+    *,
+    booking: Booking,
+    business: Business,
+    start_time: datetime,
+    master=None,
+):
+    if timezone.is_naive(start_time):
+        raise ValidationError(
+            "start_time must include timezone information."
+        )
+    if start_time < timezone.now():
+        raise ValidationError("Cannot move a booking to the past.")
+
+    validate_booking_business_scope(booking=booking, business=business)
+    locked_booking = (
+        Booking.objects.select_for_update()
+        .select_related("business", "client", "master", "service")
+        .get(pk=booking.pk)
+    )
+    validate_booking_business_scope(booking=locked_booking, business=business)
+
+    target_master = master or locked_booking.master
+    if target_master.business_id != business.id:
+        raise ValidationError("Master does not belong to the selected business.")
+    if not getattr(target_master, "is_active", False):
+        raise ValidationError("Master is inactive.")
+
+    locked_booking.master = business.masters.select_for_update().get(
+        pk=target_master.pk,
+        is_active=True,
+    )
+    locked_booking.start_time = start_time
+    locked_booking.save(update_fields=["master", "start_time", "updated_at"])
+    create_audit_log(
+        business=business,
+        client=locked_booking.client,
+        booking=locked_booking,
+        actor_type="system",
+        event_type="booking_rescheduled",
+        channel="booking",
+        payload={
+            "master_id": locked_booking.master_id,
+            "status": locked_booking.status,
+            "start_time": locked_booking.start_time.isoformat(),
+            "end_time": locked_booking.end_time.isoformat(),
+        },
+    )
+    return locked_booking
+
+
+@transaction.atomic
+def update_booking_status(
+    *,
+    booking: Booking,
+    business: Business,
+    status: str,
+):
+    validate_booking_business_scope(booking=booking, business=business)
+    locked_booking = (
+        Booking.objects.select_for_update()
+        .select_related("business", "client")
+        .get(pk=booking.pk)
+    )
+    validate_booking_business_scope(booking=locked_booking, business=business)
+
+    locked_booking.status = status
+    locked_booking.save(update_fields=["status", "updated_at"])
+    create_audit_log(
+        business=business,
+        client=locked_booking.client,
+        booking=locked_booking,
+        actor_type="system",
+        event_type="booking_status_updated",
+        channel="booking",
+        payload={
+            "status": locked_booking.status,
+        },
+    )
+    return locked_booking
 
 
 OPENAI_FUNCTION_DEFINITIONS = [
@@ -344,11 +448,21 @@ def execute_ai_function(
         return [serialize_slot(slot) for slot in slots]
 
     if function_name == "create_appointment":
+        business = Business.objects.get(pk=payload["business_id"], is_active=True)
         booking = create_appointment(
-            payload["business_id"],
-            master_id=payload["master_id"],
-            service_id=payload["service_id"],
-            client_id=payload["client_id"],
+            business=business,
+            master=business.masters.get(
+                pk=payload["master_id"],
+                is_active=True,
+            ),
+            service=business.services.get(
+                pk=payload["service_id"],
+                is_active=True,
+            ),
+            client=business.clients.get(
+                pk=payload["client_id"],
+                is_active=True,
+            ),
             start_time=datetime.fromisoformat(payload["start_time"]),
             client_data=payload["client_data"],
         )

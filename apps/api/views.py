@@ -1,5 +1,5 @@
 from django.contrib.auth import get_user_model
-from rest_framework import generics
+from rest_framework import generics, status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -7,9 +7,13 @@ from rest_framework.views import APIView
 from apps.accounts.models import BusinessMembership
 from apps.bookings.models import Booking, OutboundMessage
 
-from .permissions import HasBusinessAccess
+from .mixins import BusinessScopedQuerysetMixin
+from .permissions import BusinessAccessPermission
 from .serializers import (
-    BookingSerializer,
+    BookingCreateSerializer,
+    BookingReadSerializer,
+    BookingRescheduleSerializer,
+    BookingStatusUpdateSerializer,
     BusinessMembershipSerializer,
     OutboundMessageSerializer,
     UserSerializer,
@@ -27,7 +31,7 @@ class MeView(APIView):
 
 
 class MembershipListView(generics.ListAPIView):
-    permission_classes = [HasBusinessAccess]
+    permission_classes = [IsAuthenticated]
     serializer_class = BusinessMembershipSerializer
 
     def get_queryset(self):
@@ -38,44 +42,114 @@ class MembershipListView(generics.ListAPIView):
         )
 
 
-class BusinessScopedQuerysetMixin:
-    permission_classes = [HasBusinessAccess]
+class BookingListCreateView(
+    BusinessScopedQuerysetMixin,
+    generics.ListCreateAPIView,
+):
+    permission_classes = [
+        IsAuthenticated,
+        BusinessAccessPermission(BusinessMembership.Role.STAFF),
+    ]
+    queryset = Booking.objects.select_related(
+        "business",
+        "client",
+        "master",
+        "service",
+    ).order_by("start_time")
 
-    def get_business_ids(self):
-        return list(
-            BusinessMembership.objects.filter(
-                user=self.request.user,
-                is_active=True,
-            ).values_list("business_id", flat=True)
+    def get_serializer_class(self):
+        if self.request.method == "POST":
+            return BookingCreateSerializer
+        return BookingReadSerializer
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context["business"] = self.business
+        return context
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        booking = serializer.save()
+        response_serializer = BookingReadSerializer(
+            booking,
+            context=self.get_serializer_context(),
+        )
+        return Response(
+            response_serializer.data,
+            status=status.HTTP_201_CREATED,
         )
 
 
-class BookingListView(BusinessScopedQuerysetMixin, generics.ListAPIView):
-    serializer_class = BookingSerializer
+class BookingBaseView(BusinessScopedQuerysetMixin, generics.GenericAPIView):
+    permission_classes = [
+        IsAuthenticated,
+        BusinessAccessPermission(BusinessMembership.Role.STAFF),
+    ]
+    queryset = Booking.objects.select_related(
+        "business",
+        "client",
+        "master",
+        "service",
+    ).order_by("start_time")
 
-    def get_queryset(self):
-        queryset = (
-            Booking.objects.select_related("business", "client", "master", "service")
-            .filter(business_id__in=self.get_business_ids())
-            .order_by("start_time")
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context["business"] = self.business
+        return context
+
+
+class BookingDetailView(BookingBaseView, generics.RetrieveAPIView):
+    serializer_class = BookingReadSerializer
+
+
+class BookingRescheduleView(BookingBaseView):
+    serializer_class = BookingRescheduleSerializer
+
+    def patch(self, request, *args, **kwargs):
+        booking = self.get_object()
+        serializer = self.get_serializer(
+            booking,
+            data=request.data,
+            partial=True,
         )
-        business_id = self.request.query_params.get("business_id")
-        if business_id:
-            queryset = queryset.filter(business_id=business_id)
-        return queryset
+        serializer.is_valid(raise_exception=True)
+        updated_booking = serializer.save()
+        response_serializer = BookingReadSerializer(
+            updated_booking,
+            context=self.get_serializer_context(),
+        )
+        return Response(response_serializer.data)
+
+
+class BookingStatusUpdateView(BookingBaseView):
+    serializer_class = BookingStatusUpdateSerializer
+
+    def patch(self, request, *args, **kwargs):
+        booking = self.get_object()
+        serializer = self.get_serializer(
+            booking,
+            data=request.data,
+            partial=True,
+        )
+        serializer.is_valid(raise_exception=True)
+        updated_booking = serializer.save()
+        response_serializer = BookingReadSerializer(
+            updated_booking,
+            context=self.get_serializer_context(),
+        )
+        return Response(response_serializer.data)
 
 
 class OutboundMessageListView(BusinessScopedQuerysetMixin, generics.ListAPIView):
+    permission_classes = [
+        IsAuthenticated,
+        BusinessAccessPermission(BusinessMembership.Role.STAFF),
+    ]
     serializer_class = OutboundMessageSerializer
-
-    def get_queryset(self):
-        queryset = (
-            OutboundMessage.objects.select_related("business", "booking", "client")
-            .filter(business_id__in=self.get_business_ids())
-            .order_by("-created_at")
-        )
-        business_id = self.request.query_params.get("business_id")
-        if business_id:
-            queryset = queryset.filter(business_id=business_id)
-        return queryset
+    queryset = OutboundMessage.objects.select_related(
+        "business",
+        "booking",
+        "client",
+    ).order_by("-created_at")
 

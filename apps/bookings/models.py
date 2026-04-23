@@ -215,10 +215,6 @@ class Service(TimeStampedModel):
                 {"category": _("Category must belong to the same business.")}
             )
 
-    def save(self, *args, **kwargs):
-        self.full_clean()
-        return super().save(*args, **kwargs)
-
 
 class BookingQuerySet(models.QuerySet):
     def active(self):
