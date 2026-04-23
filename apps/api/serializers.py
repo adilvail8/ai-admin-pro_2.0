@@ -24,6 +24,7 @@ class BusinessSerializer(serializers.ModelSerializer):
             "city",
             "address",
             "working_hours",
+            "ai_rules",
             "timezone_name",
             "is_active",
         )

@@ -7,6 +7,7 @@ from django.conf import settings
 from django.utils import timezone
 from openai import OpenAI
 
+from .ai import PromptBuilder
 from .models import AIInteractionLog, Booking, Business
 from .services import OPENAI_FUNCTION_DEFINITIONS, execute_ai_function
 
@@ -14,7 +15,7 @@ from .services import OPENAI_FUNCTION_DEFINITIONS, execute_ai_function
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
-    "Ты — интеллектуальный администратор салона красоты в Казахстане. "
+    "Ты — интеллектуальный администратор бизнеса в Казахстане. "
     "Отвечай коротко, вежливо и только по данным из контекста."
 )
 VOICE_FALLBACK_MESSAGE = (
@@ -34,7 +35,7 @@ DEFAULT_FOLLOW_UP_TEMPLATE = (
     'забронировать это время за вами? Если неактуально, просто напишите "стоп".'
 )
 DEFAULT_REMINDER_TEMPLATE = (
-    "Сәлем! Ждем вас сегодня в {time} на процедуру {service_name}. "
+    "Сәлем! Ждем вас сегодня в {time} на услугу {service_name}. "
     "Если планы изменились, пожалуйста, предупредите нас заранее ✨"
 )
 ESCALATION_KEYWORDS = (
@@ -59,6 +60,7 @@ class AIManager:
         self.business = business
         self.client = client
         self.model = model or settings.OPENAI_MODEL
+        self.prompt_builder = PromptBuilder()
 
     def get_openai_client(self):
         if self.client is not None:
@@ -69,35 +71,8 @@ class AIManager:
 
     def build_system_instruction(self) -> str:
         if self.business is None:
-            current_dt = timezone.now().astimezone(ZoneInfo("Asia/Almaty"))
-            return "\n".join(
-                [
-                    SYSTEM_PROMPT,
-                    "Если клиент пишет на казахском — отвечай на казахском.",
-                    "Используй данные о компании только из предоставленного контекста.",
-                    f"Текущее время в Asia/Almaty: {current_dt:%Y-%m-%d %H:%M}.",
-                ]
-            )
-
-        business_tz = self.business.timezone_name or "Asia/Almaty"
-        current_dt = timezone.now().astimezone(ZoneInfo(business_tz))
-        return "\n".join(
-            [
-                (
-                    f"Ты — администратор салона {self.business.display_brand_name}. "
-                    f"Мы находимся по адресу: {self.business.city}, {self.business.address}. "
-                    f"Наш график: {self.business.working_hours}."
-                ),
-                "Если клиент пишет на казахском — отвечай на казахском.",
-                "Используй данные о компании только из предоставленного контекста.",
-                (
-                    "Никогда не выдумывай свободное время, услуги, цены или филиалы. "
-                    "Используй только функции и данные системы."
-                ),
-                f"Текущее локальное время: {current_dt:%Y-%m-%d %H:%M}.",
-                f"Контекст компании: {self.business.knowledge_base or 'не указан'}",
-            ]
-        )
+            return "\n\n".join([SYSTEM_PROMPT, self.prompt_builder.build_fallback_prompt()])
+        return self.prompt_builder.build_system_prompt(self.business)
 
     def summarize_conversation(self, history):
         """Scaffold for future LLM-based conversation summarization."""
@@ -105,7 +80,7 @@ class AIManager:
             return ""
 
         compressed_fragments = []
-        for item in history[:5]:
+        for item in history[:7]:
             role = item.get("role", "user")
             content = (item.get("content") or "").strip()
             if content:
@@ -118,11 +93,11 @@ class AIManager:
         if len(conversation_messages) <= 10:
             return conversation_messages, ""
 
-        summary = self.summarize_conversation(conversation_messages[:-10])
+        summary = self.summarize_conversation(conversation_messages[:-3])
         prepared_messages = []
         if summary:
             prepared_messages.append({"role": "system", "content": summary})
-        prepared_messages.extend(conversation_messages[-10:])
+        prepared_messages.extend(conversation_messages[-3:])
         return prepared_messages, summary
 
     def build_messages(self, conversation_messages):
@@ -277,7 +252,8 @@ class AIManager:
             return False
         if booking.reminder_sent_at is not None:
             return False
-        return timezone.now() >= booking.start_time - timedelta(hours=2)
+        now = timezone.now()
+        return booking.start_time - timedelta(hours=2) <= now < booking.start_time
 
     def build_reminder_message(self, *, booking):
         local_tz = timezone.get_current_timezone()

@@ -12,6 +12,8 @@ env = environ.Env(
     CSRF_TRUSTED_ORIGINS=(list, []),
     CELERY_TASK_ALWAYS_EAGER=(bool, False),
     GREEN_API_ALLOWED_IPS=(list, []),
+    DB_PORT=(int, 5432),
+    DB_CONN_MAX_AGE=(int, 60),
 )
 environ.Env.read_env(BASE_DIR / ".env")
 
@@ -28,6 +30,7 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+    "django_celery_beat",
     "rest_framework",
     "rest_framework_simplejwt",
     "rest_framework_simplejwt.token_blacklist",
@@ -67,12 +70,23 @@ TEMPLATES = [
     }
 ]
 
-DATABASES = {
-    "default": env.db(
-        "DATABASE_URL",
-        default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}",
-    )
-}
+database_url = env("DATABASE_URL", default="")
+if database_url:
+    DATABASES = {
+        "default": env.db("DATABASE_URL")
+    }
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": env("DB_NAME"),
+            "USER": env("DB_USER"),
+            "PASSWORD": env("DB_PASSWORD"),
+            "HOST": env("DB_HOST", default="127.0.0.1"),
+            "PORT": env("DB_PORT"),
+            "CONN_MAX_AGE": env("DB_CONN_MAX_AGE"),
+        }
+    }
 
 LANGUAGE_CODE = "ru-ru"
 TIME_ZONE = env("TIME_ZONE", default="Asia/Almaty")
@@ -96,6 +110,17 @@ CELERY_RESULT_BACKEND = env(
     default=CELERY_BROKER_URL,
 )
 CELERY_TASK_ALWAYS_EAGER = env("CELERY_TASK_ALWAYS_EAGER")
+CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
+CELERY_TASK_DEFAULT_QUEUE = "messages"
+CELERY_TASK_ROUTES = {
+    "apps.bookings.tasks.async_prune_history": {"queue": "maintenance"},
+    "apps.bookings.tasks.process_pending_reminders": {"queue": "maintenance"},
+    "apps.bookings.tasks.send_outbound_message": {"queue": "messages"},
+    "apps.bookings.tasks.send_booking_reminder": {"queue": "messages"},
+    "apps.bookings.tasks.send_follow_up_if_pending": {"queue": "messages"},
+    "apps.bookings.tasks.notify_human_operator": {"queue": "messages"},
+    "apps.bookings.tasks.process_ai_interaction": {"queue": "ai_processing"},
+}
 
 OPENAI_API_KEY = env("OPENAI_API_KEY", default="")
 OPENAI_MODEL = env("OPENAI_MODEL", default="gpt-4o-mini")

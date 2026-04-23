@@ -10,6 +10,24 @@ class ClientIdentityResolver:
         ConversationMessage.Channel.WHATSAPP: "whatsapp_id",
     }
 
+    def normalize_kz_phone(self, phone: str | None) -> str:
+        raw_phone = (phone or "").strip()
+        if not raw_phone:
+            return ""
+
+        digits = "".join(symbol for symbol in raw_phone if symbol.isdigit())
+        if len(digits) == 11 and digits.startswith("8"):
+            digits = f"7{digits[1:]}"
+        elif len(digits) == 10:
+            digits = f"7{digits}"
+
+        if len(digits) != 11 or not digits.startswith("7"):
+            raise ValidationError(
+                "Phone number must be a valid Kazakhstan number."
+            )
+
+        return f"+{digits}"
+
     def resolve_or_create(
         self,
         *,
@@ -20,7 +38,7 @@ class ClientIdentityResolver:
         name: str | None,
     ) -> Client:
         channel_field = self.CHANNEL_FIELD_MAP.get(channel, "")
-        phone = (phone or "").strip()
+        phone = self.normalize_kz_phone(phone)
         external_id = (external_id or "").strip()
         name = (name or "").strip()
 

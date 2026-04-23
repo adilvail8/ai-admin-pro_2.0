@@ -10,4 +10,4 @@ from .base import *  # noqa: F403,F401
 
 
 DEBUG = True
-CELERY_TASK_ALWAYS_EAGER = True
+CELERY_TASK_ALWAYS_EAGER = env("CELERY_TASK_ALWAYS_EAGER", default=True)  # noqa: F405

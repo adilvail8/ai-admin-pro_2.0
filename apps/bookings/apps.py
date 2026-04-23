@@ -6,3 +6,5 @@ class BookingsConfig(AppConfig):
     name = "apps.bookings"
     verbose_name = "Bookings"
 
+    def ready(self):
+        from . import signals  # noqa: F401

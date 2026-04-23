@@ -5,6 +5,7 @@ from .models import (
     AIInteractionLog,
     Booking,
     Business,
+    Category,
     Client,
     ConversationMessage,
     InboundEvent,
@@ -21,6 +22,13 @@ class BusinessAdmin(admin.ModelAdmin):
     search_fields = ("name", "slug")
 
 
+@admin.register(Category)
+class CategoryAdmin(admin.ModelAdmin):
+    list_display = ("name", "business", "is_active", "created_at")
+    list_filter = ("business", "is_active")
+    search_fields = ("name", "description")
+
+
 @admin.register(Master)
 class MasterAdmin(admin.ModelAdmin):
     list_display = ("full_name", "business", "specialization", "is_active")
@@ -32,14 +40,15 @@ class MasterAdmin(admin.ModelAdmin):
 class ServiceAdmin(admin.ModelAdmin):
     list_display = (
         "name",
+        "category",
         "business",
         "price",
         "duration",
         "buffer_time",
         "is_active",
     )
-    list_filter = ("business", "is_active")
-    search_fields = ("name",)
+    list_filter = ("business", "category", "is_active")
+    search_fields = ("name", "category__name")
 
 
 @admin.register(Client)

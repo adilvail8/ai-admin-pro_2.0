@@ -1,0 +1,13 @@
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.py[cod]
+.pytest_cache
+pytest-cache-files-*
+.mypy_cache
+db.sqlite3
+test_db.sqlite3
+media
+staticfiles

@@ -239,7 +239,4 @@ def get_transport_for_channel(channel: str) -> OutboundTransport:
         "telegram": TelegramTransport(),
         "internal": InternalAlertTransport(),
     }
-    try:
-        return transports[channel]
-    except KeyError as error:
-        raise ValueError(f"Unsupported outbound channel: {channel}") from error
+    return transports.get(channel, WhatsAppTransport())

@@ -45,6 +45,13 @@ class Business(TimeStampedModel):
             "System prompt, model name, temperature and tool settings."
         ),
     )
+    ai_rules = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=_(
+            "Business-specific AI rules and restrictions."
+        ),
+    )
     knowledge_base = models.TextField(
         blank=True,
         help_text=_("Business-specific context for the AI assistant."),
@@ -80,6 +87,15 @@ class Business(TimeStampedModel):
     @property
     def display_brand_name(self):
         return self.brand_name or self.name
+
+    def get_ai_rules_list(self):
+        if isinstance(self.ai_rules, dict):
+            rules = self.ai_rules.get("rules", [])
+            if isinstance(rules, list):
+                return [str(rule).strip() for rule in rules if str(rule).strip()]
+        if isinstance(self.ai_rules, list):
+            return [str(rule).strip() for rule in self.ai_rules if str(rule).strip()]
+        return []
 
 
 class Master(TimeStampedModel):
@@ -122,11 +138,43 @@ class Master(TimeStampedModel):
         )
 
 
+class Category(TimeStampedModel):
+    business = models.ForeignKey(
+        Business,
+        on_delete=models.CASCADE,
+        related_name="categories",
+    )
+    name = models.CharField(max_length=255)
+    description = models.TextField(blank=True, default="")
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ("name",)
+        verbose_name = _("category")
+        verbose_name_plural = _("categories")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("business", "name"),
+                name="uniq_category_name_per_business",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.name} ({self.business.name})"
+
+
 class Service(TimeStampedModel):
     business = models.ForeignKey(
         Business,
         on_delete=models.CASCADE,
         related_name="services",
+    )
+    category = models.ForeignKey(
+        Category,
+        on_delete=models.SET_NULL,
+        related_name="services",
+        null=True,
+        blank=True,
     )
     name = models.CharField(max_length=255)
     price = models.DecimalField(
@@ -159,6 +207,17 @@ class Service(TimeStampedModel):
 
     def __str__(self):
         return f"{self.name} ({self.business.name})"
+
+    def clean(self):
+        super().clean()
+        if self.category_id and self.business_id != self.category.business_id:
+            raise ValidationError(
+                {"category": _("Category must belong to the same business.")}
+            )
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
 
 
 class BookingQuerySet(models.QuerySet):
@@ -359,6 +418,14 @@ class Booking(TimeStampedModel):
                 raise ValidationError(
                     _("Master and service must belong to the same business.")
                 )
+        if (
+            self.service_id
+            and self.service.category_id
+            and self.service.category.business_id != self.service.business_id
+        ):
+            raise ValidationError(
+                {"service": _("Service category must belong to the same business.")}
+            )
         if self.client_id and self.business_id != self.client.business_id:
             raise ValidationError(
                 {"client": _("Client must belong to the same business.")}
@@ -469,6 +536,7 @@ class OutboundMessage(TimeStampedModel):
         SUBMITTED = "submitted", _("Submitted")
         DELIVERED = "delivered", _("Delivered")
         FAILED = "failed", _("Failed")
+        CANCELLED = "cancelled", _("Cancelled")
         DEAD_LETTER = "dead_letter", _("Dead letter")
 
     business = models.ForeignKey(

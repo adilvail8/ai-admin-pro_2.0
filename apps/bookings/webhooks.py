@@ -9,7 +9,7 @@ from django.utils import timezone
 from .ai_manager import AIManager, AI_RETRY_MESSAGE, HUMAN_HANDOFF_MESSAGE, VOICE_FALLBACK_MESSAGE
 from .client_identity import ClientIdentityResolver
 from .models import Booking, Business, Client, ConversationMessage, InboundEvent
-from .tasks import notify_human_operator
+from .tasks import async_prune_history, notify_human_operator
 
 
 logger = logging.getLogger(__name__)
@@ -126,11 +126,26 @@ def store_message(*, business_id: int, client: Client, channel: str, role: str, 
         role=role,
         content=content,
     )
-    ConversationMessage.prune_history(
+    message_count = ConversationMessage.objects.filter(
         business_id=business_id,
         client_id=client.id,
         channel=channel,
-    )
+    ).count()
+    if message_count >= 20 and message_count % 10 == 0:
+        if settings.CELERY_TASK_ALWAYS_EAGER:
+            async_prune_history.apply(
+                kwargs={
+                    "business_id": business_id,
+                    "client_id": client.id,
+                    "channel": channel,
+                }
+            ).get()
+        else:
+            async_prune_history.delay(
+                business_id=business_id,
+                client_id=client.id,
+                channel=channel,
+            )
     return message
 
 
@@ -194,6 +209,7 @@ def request_human_handoff(*, booking, reason: str, attempts: int):
         }
     )
     if handoff_result.get("notification_status") in {
+        "queued",
         "submitted",
         "delivered",
     }:

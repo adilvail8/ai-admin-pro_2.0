@@ -18,16 +18,18 @@ JWT API for operator and owner interfaces.
 1. Create a virtual environment and install dependencies:
    `pip install -r requirements.txt`
 2. Copy `.env.example` to `.env`
-3. Run database migrations:
+3. Create a dedicated PostgreSQL database and user for this project
+4. Check PostgreSQL connectivity:
+   `python manage.py check_postgres`
+5. Run database migrations:
    `python manage.py migrate`
-4. Create an admin user if needed:
+6. Create an admin user if needed:
    `python manage.py createsuperuser`
-5. Start the server:
+7. Start the server:
    `python manage.py runserver`
 
-By default, local development uses SQLite so you can boot the project quickly
-without PostgreSQL or Redis. Production settings are still compatible with
-PostgreSQL and Redis.
+The main application now uses PostgreSQL-first settings. Tests still run on
+SQLite for speed and isolation.
 
 ## API
 
@@ -65,3 +67,62 @@ external CRM integration.
 ## Environment Variables
 
 Main variables are documented in `.env.example`.
+
+Recommended PostgreSQL setup:
+
+- create a dedicated database user, for example `adil_admin`
+- grant that user access only to the project database
+- do not use the shared superuser `postgres` for the Django app itself
+
+## Docker Stack
+
+Files included:
+
+- `Dockerfile`
+- `docker-compose.yml`
+- `docker/entrypoint.sh`
+- `docker/postgres/initdb/01-create-app-db.sh`
+
+How to run:
+
+1. Copy `.env.example` to `.env`
+2. In `.env`, for Docker set:
+   `DB_HOST=db`
+   `CELERY_BROKER_URL=redis://redis:6379/0`
+   `CELERY_RESULT_BACKEND=redis://redis:6379/0`
+   `CELERY_TASK_ALWAYS_EAGER=False`
+   and fill in all passwords/secrets
+2. Start the stack:
+   `docker compose up --build`
+3. Check that Django sees PostgreSQL:
+   `docker compose exec web python manage.py check_postgres`
+
+Notes:
+
+- stack includes `db`, `redis`, `web`, `worker_messages`, `worker_ai`, `worker_maintenance`, and `beat`
+- `web` waits for healthy PostgreSQL and Redis, then runs `check_postgres`, `migrate`, and starts `gunicorn`
+- `worker_messages` handles outbound delivery, reminders, follow-ups, and handoff notifications from the `messages` queue
+- `worker_ai` is reserved for `ai_processing` tasks, so slow LLM work does not block messaging
+- `worker_maintenance` handles `maintenance` tasks such as history pruning and reminder scanning
+- `beat` runs Celery Beat for scheduled reminders/follow-ups
+- PostgreSQL data is stored in the named volume `postgres_data`
+- static and media directories are stored in named volumes so admin assets survive container restarts
+- all passwords and secrets are loaded from `.env`
+
+## Celery Queues
+
+Configured queues:
+
+- `messages` - outbound messages, reminders, follow-ups, handoff notifications
+- `ai_processing` - AI-heavy background processing
+- `maintenance` - maintenance tasks such as conversation pruning and periodic scans
+
+Current routing is defined in [F:\django-sprint4-main\ai-admin-pro_2.0-main\config\settings\base.py](F:\django-sprint4-main\ai-admin-pro_2.0-main\config\settings\base.py).
+
+Operational checks:
+
+- `GET /api/v1/health/` now returns:
+  - DB status
+  - broker/scheduler readiness
+  - eager-mode warning
+  - configured Celery queue routes

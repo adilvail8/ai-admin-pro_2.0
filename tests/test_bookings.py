@@ -17,6 +17,7 @@ from apps.bookings.models import (
     AIInteractionLog,
     Booking,
     Business,
+    Category,
     Client,
     ConversationMessage,
     InboundEvent,
@@ -32,7 +33,9 @@ from apps.bookings.services import (
 )
 from apps.bookings.tasks import (
     notify_human_operator,
+    process_pending_reminders,
     send_booking_reminder,
+    send_outbound_message,
     send_follow_up_if_pending,
 )
 from apps.bookings.transports import SendResult, TelegramTransport, WhatsAppTransport
@@ -41,6 +44,7 @@ from apps.bookings.webhooks import (
     get_or_create_client,
     handle_audio_message,
     handle_text_message,
+    store_message,
 )
 
 
@@ -51,7 +55,7 @@ User = get_user_model()
 def business():
     return Business.objects.create(
         name="Barber House",
-        brand_name="Sahar & Vosk",
+        brand_name="Urban Flow",
         address="Розыбакиева 247а",
         working_hours="10:00-20:00",
         knowledge_base="Standalone barbershop assistant.",
@@ -346,6 +350,8 @@ def test_ai_manager_builds_multi_tenant_prompt(business):
     assert business.display_brand_name in messages[0]["content"]
     assert business.address in messages[0]["content"]
     assert business.working_hours in messages[0]["content"]
+    assert "Сегодня:" in messages[0]["content"]
+    assert "Бүгін:" in messages[0]["content"]
     assert "Если клиент пишет на казахском" in messages[0]["content"]
 
 
@@ -355,7 +361,8 @@ def test_ai_manager_fallback_prompt_keeps_system_prompt():
     messages = ai_manager.build_messages([{"role": "user", "content": "Привет"}])
 
     assert SYSTEM_PROMPT in messages[0]["content"]
-    assert "Asia/Almaty" in messages[0]["content"]
+    assert "Сегодня:" in messages[0]["content"]
+    assert "Бүгін:" in messages[0]["content"]
 
 
 @pytest.mark.django_db
@@ -369,8 +376,13 @@ def test_ai_manager_summarizes_long_history(business):
     prepared_messages, summary = ai_manager.prepare_conversation_messages(history)
 
     assert summary.startswith("Краткое резюме")
-    assert len(prepared_messages) == 11
+    assert len(prepared_messages) == 4
     assert prepared_messages[0]["role"] == "system"
+    assert [item["content"] for item in prepared_messages[1:]] == [
+        "message-9",
+        "message-10",
+        "message-11",
+    ]
 
 
 @pytest.mark.django_db
@@ -514,7 +526,7 @@ def test_follow_up_task_creates_and_sends_outbound_message(
 
     assert result["status"] == OutboundMessage.Status.SUBMITTED
     assert outbound_message.submitted_at is not None
-    assert booking.follow_up_sent_at is not None
+    assert booking.follow_up_sent_at is None
     assert AuditLog.objects.filter(
         outbound_message=outbound_message,
         event_type="outbound_submitted",
@@ -633,11 +645,98 @@ def test_reminder_task_creates_and_sends_outbound_message(
     assert result["status"] == OutboundMessage.Status.SUBMITTED
     assert service.name in result["text"]
     assert outbound_message.submitted_at is not None
-    assert booking.reminder_sent_at is not None
+    assert booking.reminder_sent_at is None
     assert AuditLog.objects.filter(
         outbound_message=outbound_message,
         event_type="reminder_queued",
     ).exists()
+
+
+@pytest.mark.django_db
+def test_reminder_task_reuses_failed_outbound_instead_of_creating_duplicate(
+    business,
+    client_profile,
+    master,
+    service,
+):
+    booking = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(hours=1, minutes=30),
+        client_data={"name": client_profile.name},
+        status=Booking.Status.CONFIRMED,
+    )
+    failed_message = OutboundMessage.objects.create(
+        business=business,
+        client=client_profile,
+        booking=booking,
+        channel="whatsapp",
+        recipient=str(client_profile.phone),
+        message_type="reminder",
+        text="Reminder",
+        status=OutboundMessage.Status.FAILED,
+        attempts=1,
+        error_code="provider_down",
+    )
+
+    result = send_booking_reminder.run(booking.id)
+
+    assert result["status"] == OutboundMessage.Status.FAILED
+    assert result["outbound_message_id"] == failed_message.id
+    assert OutboundMessage.objects.filter(
+        booking=booking,
+        message_type="reminder",
+    ).count() == 1
+
+
+@pytest.mark.django_db
+def test_outbound_retry_cancels_expired_reminder_before_transport_call(
+    business,
+    client_profile,
+    master,
+    service,
+    monkeypatch,
+):
+    class ShouldNotBeCalledTransport:
+        def send_text(self, *, recipient, text, metadata=None):
+            raise AssertionError("Transport should not be called for expired reminders")
+
+    monkeypatch.setattr(
+        "apps.bookings.tasks.get_transport_for_channel",
+        lambda channel: ShouldNotBeCalledTransport(),
+    )
+
+    booking = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(hours=1),
+        client_data={"name": client_profile.name},
+        status=Booking.Status.CONFIRMED,
+    )
+    Booking.objects.filter(pk=booking.pk).update(
+        start_time=timezone.now() - timedelta(minutes=10),
+        end_time=timezone.now() + timedelta(minutes=65),
+    )
+    outbound_message = OutboundMessage.objects.create(
+        business=business,
+        client=client_profile,
+        booking=booking,
+        channel="whatsapp",
+        recipient=str(client_profile.phone),
+        message_type="reminder",
+        text="Reminder",
+    )
+
+    result = send_outbound_message.run(outbound_message.id)
+    outbound_message.refresh_from_db()
+
+    assert result["status"] == OutboundMessage.Status.CANCELLED
+    assert outbound_message.status == OutboundMessage.Status.CANCELLED
+    assert outbound_message.error_code == "booking_start_time_already_passed"
 
 
 @pytest.mark.django_db
@@ -819,6 +918,26 @@ def test_healthcheck_returns_ok(client):
 
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
+    assert response.json()["celery"]["default_queue"] == "messages"
+    assert "apps.bookings.tasks.async_prune_history" in response.json()["celery"]["routes"]
+
+
+@pytest.mark.django_db
+@override_settings(CELERY_TASK_ALWAYS_EAGER=False)
+def test_healthcheck_fails_when_broker_is_unavailable(client, monkeypatch):
+    from apps.bookings.views import healthcheck
+
+    monkeypatch.setitem(
+        healthcheck.__globals__,
+        "check_broker_connection",
+        lambda: False,
+    )
+
+    response = client.get("/api/v1/health/")
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "failed"
+    assert response.json()["checks"]["broker"] == "failed"
 
 
 @pytest.mark.django_db
@@ -1007,6 +1126,41 @@ def test_rate_limit_is_checked_before_user_message_persist(
         ).count()
         == 1
     )
+
+
+@pytest.mark.django_db
+@override_settings(CELERY_TASK_ALWAYS_EAGER=False)
+def test_store_message_schedules_async_prune_instead_of_running_inline(
+    business,
+    client_profile,
+    monkeypatch,
+):
+    scheduled_calls = []
+
+    def fake_delay(**kwargs):
+        scheduled_calls.append(kwargs)
+
+    monkeypatch.setattr(
+        "apps.bookings.webhooks.async_prune_history.delay",
+        fake_delay,
+    )
+
+    for index in range(20):
+        store_message(
+            business_id=business.id,
+            client=client_profile,
+            channel=ConversationMessage.Channel.WHATSAPP,
+            role=ConversationMessage.Role.USER,
+            content=f"message-{index}",
+        )
+
+    assert scheduled_calls == [
+        {
+            "business_id": business.id,
+            "client_id": client_profile.id,
+            "channel": ConversationMessage.Channel.WHATSAPP,
+        }
+    ]
 
 
 @pytest.mark.django_db
@@ -1299,3 +1453,206 @@ def test_whatsapp_webhook_normalizes_green_api_payload(client, business, monkeyp
         business=business,
         phone="+77070000004",
     ).exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("raw_phone", "expected_phone"),
+    [
+        ("87070000011", "+77070000011"),
+        ("77070000011", "+77070000011"),
+        ("+77070000011", "+77070000011"),
+    ],
+)
+def test_client_identity_resolver_normalizes_kz_phone(
+    business,
+    raw_phone,
+    expected_phone,
+):
+    resolved = ClientIdentityResolver().resolve_or_create(
+        business=business,
+        channel=ConversationMessage.Channel.WHATSAPP,
+        phone=raw_phone,
+        external_id=f"wa-{raw_phone}",
+        name="Normalized client",
+    )
+
+    assert str(resolved.phone) == expected_phone
+
+
+@pytest.mark.django_db
+@override_settings(
+    GREEN_API_SHARED_SECRET="green-secret",
+    GREEN_API_ALLOWED_IPS=["127.0.0.1"],
+)
+def test_whatsapp_webhook_returns_friendly_reply_for_media_callback(
+    client,
+    business,
+):
+    response = client.post(
+        f"/api/v1/webhooks/whatsapp/{business.id}/",
+        data=json.dumps(
+            {
+                "idMessage": "wamid-image-1",
+                "senderData": {
+                    "chatId": "87070000012@c.us",
+                    "senderName": "Media User",
+                },
+                "messageData": {
+                    "typeMessage": "imageMessage",
+                },
+            }
+        ),
+        content_type="application/json",
+        HTTP_X_GREENAPI_SECRET="green-secret",
+        REMOTE_ADDR="127.0.0.1",
+    )
+
+    assert response.status_code == 200
+    assert "только текстовые сообщения" in response.json()["reply"]
+
+
+@pytest.mark.django_db
+def test_ai_manager_includes_business_ai_rules(business):
+    business.ai_rules = {
+        "rules": [
+            "Never book forbidden service combinations.",
+            "Offer an alternative if a business rule blocks the request.",
+        ]
+    }
+    business.save(update_fields=["ai_rules", "updated_at"])
+
+    ai_manager = AIManager(business=business, client=object(), model="test-model")
+    system_prompt = ai_manager.build_messages(
+        [{"role": "user", "content": "Hello"}]
+    )[0]["content"]
+
+    assert "Индивидуальные правила бизнеса" in system_prompt
+    assert "Never book forbidden service combinations." in system_prompt
+
+
+@pytest.mark.django_db
+def test_service_can_belong_to_generic_category(business):
+    category = Category.objects.create(
+        business=business,
+        name="Universal Services",
+        description="Reusable category for any business domain.",
+    )
+    categorized_service = Service.objects.create(
+        business=business,
+        category=category,
+        name="Consultation",
+        price=Decimal("10.00"),
+        duration=timedelta(minutes=30),
+    )
+
+    assert categorized_service.category == category
+    assert categorized_service.category.name == "Universal Services"
+
+
+@pytest.mark.django_db
+def test_service_rejects_category_from_another_business(
+    business,
+    another_business,
+):
+    foreign_category = Category.objects.create(
+        business=another_business,
+        name="Foreign category",
+    )
+
+    with pytest.raises(ValidationError):
+        Service.objects.create(
+            business=business,
+            category=foreign_category,
+            name="Consultation",
+            price=Decimal("10.00"),
+            duration=timedelta(minutes=30),
+        )
+
+
+@pytest.mark.django_db
+def test_process_pending_reminders_queues_due_tasks(
+    business,
+    client_profile,
+    master,
+    service,
+    monkeypatch,
+):
+    reminder_booking = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(hours=1, minutes=30),
+        client_data={"name": client_profile.name},
+        status=Booking.Status.CONFIRMED,
+    )
+    follow_up_booking = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(days=1),
+        client_data={"name": client_profile.name},
+        status=Booking.Status.PENDING,
+    )
+    follow_up_booking.created_at = timezone.now() - timedelta(hours=1, minutes=5)
+    follow_up_booking.save(update_fields=["created_at", "updated_at"])
+
+    queued_calls = []
+
+    def fake_delay(booking_id):
+        queued_calls.append(booking_id)
+
+    monkeypatch.setattr(
+        "apps.bookings.tasks.send_booking_reminder.delay",
+        fake_delay,
+    )
+    monkeypatch.setattr(
+        "apps.bookings.tasks.send_follow_up_if_pending.delay",
+        fake_delay,
+    )
+
+    result = process_pending_reminders()
+
+    assert result["reminders_queued"] == 1
+    assert result["follow_ups_queued"] == 1
+    assert reminder_booking.id in queued_calls
+    assert follow_up_booking.id in queued_calls
+
+
+@pytest.mark.django_db
+def test_send_booking_reminder_uses_whatsapp_when_only_phone_exists(
+    business,
+    master,
+    service,
+    monkeypatch,
+):
+    client_with_phone = Client.objects.create(
+        business=business,
+        name="Phone only",
+        phone="+77079999999",
+    )
+    booking = Booking.objects.create(
+        business=business,
+        client=client_with_phone,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(hours=1, minutes=30),
+        client_data={"name": client_with_phone.name},
+        status=Booking.Status.CONFIRMED,
+    )
+    monkeypatch.setattr(
+        "apps.bookings.tasks.get_transport_for_channel",
+        lambda channel: AcceptingTransport(),
+    )
+
+    result = send_booking_reminder.run(booking.id)
+    outbound_message = OutboundMessage.objects.get(
+        booking=booking,
+        message_type="reminder",
+    )
+
+    assert result["status"] == OutboundMessage.Status.SUBMITTED
+    assert outbound_message.channel == "whatsapp"
+    assert outbound_message.recipient == "+77079999999"

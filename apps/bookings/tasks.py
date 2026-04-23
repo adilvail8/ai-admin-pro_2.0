@@ -1,4 +1,5 @@
 import logging
+from datetime import timedelta
 
 from celery import shared_task
 from django.conf import settings
@@ -29,6 +30,8 @@ def get_client_channel(client) -> str:
         return "whatsapp"
     if client.telegram_id:
         return "telegram"
+    if client.phone:
+        return "whatsapp"
     return "unknown"
 
 
@@ -37,7 +40,7 @@ def get_client_recipient(client, channel: str) -> str:
         return client.whatsapp_id or str(client.phone)
     if channel == "telegram":
         return client.telegram_id or client.external_id
-    return ""
+    return str(client.phone or client.external_id or "")
 
 
 def get_or_create_outbound_message(
@@ -56,6 +59,9 @@ def get_or_create_outbound_message(
                 OutboundMessage.Status.QUEUED,
                 OutboundMessage.Status.SUBMITTED,
                 OutboundMessage.Status.DELIVERED,
+                OutboundMessage.Status.FAILED,
+                OutboundMessage.Status.CANCELLED,
+                OutboundMessage.Status.DEAD_LETTER,
             ],
         )
         .order_by("-created_at")
@@ -78,26 +84,120 @@ def get_or_create_outbound_message(
     )
 
 
+def build_existing_outbound_result(outbound_message: OutboundMessage) -> dict:
+    payload = {
+        "outbound_message_id": outbound_message.id,
+        "status": outbound_message.status,
+        "channel": outbound_message.channel,
+        "text": outbound_message.text,
+        "provider_message_id": outbound_message.provider_message_id,
+    }
+    if outbound_message.submitted_at:
+        payload["submitted_at"] = outbound_message.submitted_at.isoformat()
+    if outbound_message.delivered_at:
+        payload["delivered_at"] = outbound_message.delivered_at.isoformat()
+    return payload
+
+
 def sync_booking_delivery_marker(outbound_message: OutboundMessage):
-    if outbound_message.status not in {
-        OutboundMessage.Status.SUBMITTED,
-        OutboundMessage.Status.DELIVERED,
-    }:
+    if outbound_message.status != OutboundMessage.Status.DELIVERED:
         return
 
     if not outbound_message.booking_id:
         return
 
     booking = outbound_message.booking
+    delivered_at = outbound_message.delivered_at or outbound_message.submitted_at
     if outbound_message.message_type == "reminder" and booking.reminder_sent_at is None:
-        booking.reminder_sent_at = outbound_message.submitted_at
+        booking.reminder_sent_at = delivered_at
         booking.save(update_fields=["reminder_sent_at", "updated_at"])
     elif (
         outbound_message.message_type == "follow_up"
         and booking.follow_up_sent_at is None
     ):
-        booking.follow_up_sent_at = outbound_message.submitted_at
+        booking.follow_up_sent_at = delivered_at
         booking.save(update_fields=["follow_up_sent_at", "updated_at"])
+
+
+def get_outbound_skip_reason(outbound_message: OutboundMessage) -> str:
+    booking = outbound_message.booking
+    if booking is None:
+        return ""
+
+    now = timezone.now()
+    if outbound_message.message_type == "reminder":
+        if booking.status != Booking.Status.CONFIRMED:
+            return "booking_is_not_confirmed"
+        if booking.reminder_sent_at is not None:
+            return "reminder_already_delivered"
+        if now >= booking.start_time:
+            return "booking_start_time_already_passed"
+
+    if outbound_message.message_type == "follow_up":
+        if booking.status != Booking.Status.PENDING:
+            return "booking_is_not_pending"
+        if booking.follow_up_sent_at is not None:
+            return "follow_up_already_delivered"
+        if booking.client_id and not booking.client.allow_follow_up:
+            return "client_opted_out"
+
+    return ""
+
+
+def cancel_obsolete_outbound(outbound_message: OutboundMessage, *, reason: str):
+    outbound_message.status = OutboundMessage.Status.CANCELLED
+    outbound_message.error_code = reason
+    outbound_message.last_error = f"Outbound message cancelled: {reason}."
+    outbound_message.save(
+        update_fields=["status", "error_code", "last_error", "updated_at"]
+    )
+    create_audit_log(
+        business=outbound_message.business,
+        client=outbound_message.client,
+        booking=outbound_message.booking,
+        outbound_message=outbound_message,
+        actor_type="system",
+        event_type="outbound_cancelled",
+        channel=outbound_message.channel,
+        payload={"reason": reason},
+    )
+    return {
+        "outbound_message_id": outbound_message.id,
+        "status": outbound_message.status,
+        "channel": outbound_message.channel,
+        "error_code": outbound_message.error_code,
+    }
+
+
+def schedule_outbound_retry(outbound_message: OutboundMessage):
+    if outbound_message.attempts >= settings.MAX_OUTBOUND_ATTEMPTS:
+        return None
+    if settings.CELERY_TASK_ALWAYS_EAGER:
+        return None
+
+    eta = timezone.now() + timedelta(minutes=5)
+    async_result = send_outbound_message.apply_async(
+        args=(outbound_message.id,),
+        countdown=300,
+    )
+    create_audit_log(
+        business=outbound_message.business,
+        client=outbound_message.client,
+        booking=outbound_message.booking,
+        outbound_message=outbound_message,
+        actor_type="system",
+        event_type="outbound_retry_scheduled",
+        channel=outbound_message.channel,
+        payload={
+            "retry_task_id": async_result.id,
+            "retry_eta": eta.isoformat(),
+            "attempts": outbound_message.attempts,
+        },
+    )
+    return {
+        "delivery_task_id": async_result.id,
+        "retry_eta": eta.isoformat(),
+    }
 
 
 def mark_outbound_as_failed(outbound_message: OutboundMessage, *, error_code: str, error_message: str):
@@ -149,6 +249,8 @@ def mark_outbound_as_failed(outbound_message: OutboundMessage, *, error_code: st
                 "error_message": error_message,
             },
         )
+        return schedule_outbound_retry(outbound_message)
+    return None
 
 
 @shared_task(
@@ -172,6 +274,7 @@ def send_outbound_message(self, outbound_message_id: int):
     if outbound_message.status in {
         OutboundMessage.Status.SUBMITTED,
         OutboundMessage.Status.DELIVERED,
+        OutboundMessage.Status.CANCELLED,
         OutboundMessage.Status.DEAD_LETTER,
     }:
         return {
@@ -181,6 +284,10 @@ def send_outbound_message(self, outbound_message_id: int):
             "text": outbound_message.text,
             "provider_message_id": outbound_message.provider_message_id,
         }
+
+    skip_reason = get_outbound_skip_reason(outbound_message)
+    if skip_reason:
+        return cancel_obsolete_outbound(outbound_message, reason=skip_reason)
 
     outbound_message.attempts += 1
     outbound_message.save(update_fields=["attempts", "updated_at"])
@@ -207,17 +314,20 @@ def send_outbound_message(self, outbound_message_id: int):
                 "channel": outbound_message.channel,
             },
         )
-        mark_outbound_as_failed(
+        retry_context = mark_outbound_as_failed(
             outbound_message,
             error_code="transport_exception",
             error_message=str(error),
         )
-        return {
+        result_payload = {
             "outbound_message_id": outbound_message.id,
             "status": outbound_message.status,
             "error_code": outbound_message.error_code,
             "error_message": outbound_message.last_error,
         }
+        if retry_context:
+            result_payload.update(retry_context)
+        return result_payload
 
     outbound_message.provider_message_id = result.provider_message_id or ""
     outbound_message.provider_response = result.raw_response
@@ -277,11 +387,21 @@ def send_outbound_message(self, outbound_message_id: int):
         )
         sync_booking_delivery_marker(outbound_message)
     else:
-        mark_outbound_as_failed(
+        retry_context = mark_outbound_as_failed(
             outbound_message,
             error_code=outbound_message.error_code or "provider_rejected",
             error_message=outbound_message.last_error or "Provider rejected the message.",
         )
+        if retry_context:
+            return {
+                "outbound_message_id": outbound_message.id,
+                "status": outbound_message.status,
+                "channel": outbound_message.channel,
+                "text": outbound_message.text,
+                "provider_message_id": outbound_message.provider_message_id,
+                "error_code": outbound_message.error_code,
+                **retry_context,
+            }
 
     return {
         "outbound_message_id": outbound_message.id,
@@ -339,6 +459,8 @@ def send_booking_reminder(self, booking_id: int):
             channel=channel,
             payload={"message_type": "reminder"},
         )
+    else:
+        return build_existing_outbound_result(outbound_message)
     return dispatch_outbound_delivery(outbound_message.id)
 
 
@@ -391,7 +513,80 @@ def send_follow_up_if_pending(self, booking_id: int):
             channel=channel,
             payload={"message_type": "follow_up"},
         )
+    else:
+        return build_existing_outbound_result(outbound_message)
     return dispatch_outbound_delivery(outbound_message.id)
+
+
+@shared_task
+def process_pending_reminders():
+    now = timezone.now()
+    reminder_threshold = now + timedelta(hours=2)
+
+    reminder_ids = list(
+        Booking.objects.select_related("client", "service", "business")
+        .filter(
+            status=Booking.Status.CONFIRMED,
+            reminder_sent_at__isnull=True,
+            start_time__lte=reminder_threshold,
+            start_time__gte=now,
+            client__is_active=True,
+        )
+        .values_list("id", flat=True)
+    )
+    follow_up_ids = list(
+        Booking.objects.select_related("client", "service", "business")
+        .filter(
+            status=Booking.Status.PENDING,
+            follow_up_sent_at__isnull=True,
+            created_at__lte=now - timedelta(hours=1),
+            client__allow_follow_up=True,
+            client__is_active=True,
+        )
+        .values_list("id", flat=True)
+    )
+
+    for booking_id in reminder_ids:
+        send_booking_reminder.delay(booking_id)
+
+    for booking_id in follow_up_ids:
+        send_follow_up_if_pending.delay(booking_id)
+
+    return {
+        "processed_at": now.isoformat(),
+        "reminders_queued": len(reminder_ids),
+        "follow_ups_queued": len(follow_up_ids),
+    }
+
+
+@shared_task(name="apps.bookings.tasks.async_prune_history")
+def async_prune_history(*, business_id: int, client_id: int, channel: str):
+    from .models import ConversationMessage
+
+    ConversationMessage.prune_history(
+        business_id=business_id,
+        client_id=client_id,
+        channel=channel,
+    )
+    return {
+        "business_id": business_id,
+        "client_id": client_id,
+        "channel": channel,
+        "status": "completed",
+    }
+
+
+@shared_task(name="apps.bookings.tasks.process_ai_interaction")
+def process_ai_interaction(*, business_id: int, conversation_messages: list[dict]):
+    from .models import Business
+
+    business = Business.objects.get(pk=business_id, is_active=True)
+    ai_manager = AIManager(business=business)
+    reply = ai_manager.generate_reply(conversation_messages)
+    return {
+        "business_id": business_id,
+        "reply": reply,
+    }
 
 
 @shared_task(

@@ -42,6 +42,37 @@ def build_day_window(target_date: date):
     return day_start, day_start + timedelta(days=1)
 
 
+def validate_business_booking_rules(*, business, master, service):
+    ai_rules = business.ai_rules if isinstance(business.ai_rules, dict) else {}
+    blocked_service_ids = {
+        int(item) for item in ai_rules.get("blocked_service_ids", []) if str(item).isdigit()
+    }
+    blocked_master_ids = {
+        int(item) for item in ai_rules.get("blocked_master_ids", []) if str(item).isdigit()
+    }
+    blocked_category_ids = {
+        int(item)
+        for item in ai_rules.get("blocked_category_ids", [])
+        if str(item).isdigit()
+    }
+    blocked_pairs = ai_rules.get("blocked_master_service_pairs", [])
+
+    if service.id in blocked_service_ids:
+        raise ValidationError("This service is blocked by business rules.")
+    if master.id in blocked_master_ids:
+        raise ValidationError("This master is blocked by business rules.")
+    if service.category_id and service.category_id in blocked_category_ids:
+        raise ValidationError("This service category is blocked by business rules.")
+
+    for pair in blocked_pairs:
+        if not isinstance(pair, dict):
+            continue
+        if pair.get("master_id") == master.id and pair.get("service_id") == service.id:
+            raise ValidationError(
+                "This master cannot be booked for the selected service."
+            )
+
+
 def iter_master_slots(
     *,
     master,
@@ -154,6 +185,11 @@ def create_appointment(
     )
     service = business.services.get(pk=service_id, is_active=True)
     client = business.clients.get(pk=client_id, is_active=True)
+    validate_business_booking_rules(
+        business=business,
+        master=master,
+        service=service,
+    )
     provisional_end_time = start_time + service.duration + service.buffer_time
 
     conflicting_booking = (

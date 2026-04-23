@@ -1,6 +1,7 @@
 import json
 from hashlib import sha256
 
+import redis
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import connection
@@ -11,6 +12,7 @@ from django.views.decorators.http import require_POST
 
 from .audit import create_audit_log
 from .models import ConversationMessage, OutboundMessage
+from .tasks import sync_booking_delivery_marker
 from .webhooks import (
     get_business,
     get_or_create_client,
@@ -19,9 +21,16 @@ from .webhooks import (
     mark_inbound_event_failed,
     mark_inbound_event_processed,
     register_inbound_event,
+    store_message,
     verify_green_api_request,
     verify_telegram_secret,
     verify_webhook_token,
+)
+
+
+UNSUPPORTED_MEDIA_MESSAGE = (
+    "Пока я понимаю только текстовые сообщения. "
+    "Напишите, пожалуйста, ваш вопрос текстом, и я сразу помогу."
 )
 
 
@@ -56,8 +65,7 @@ def normalize_whatsapp_green_api_payload(payload: dict, business_id: int) -> dic
         or message_data.get("extendedTextMessageData", {}).get("text")
         or payload.get("text", "")
     )
-    if type_message and "text" not in type_message.lower():
-        raise ValidationError("Only text WhatsApp callbacks are supported for now.")
+    unsupported_media = bool(type_message and "text" not in type_message.lower())
 
     chat_id = str(sender_data.get("chatId", "")).strip()
     phone = chat_id.replace("@c.us", "").replace("@g.us", "")
@@ -70,6 +78,7 @@ def normalize_whatsapp_green_api_payload(payload: dict, business_id: int) -> dic
         "phone": phone,
         "name": sender_data.get("senderName", ""),
         "text": text,
+        "unsupported_media": unsupported_media,
         "provider_event_id": (
             str(payload.get("idMessage", "")).strip()
             or str(message_data.get("idMessage", "")).strip()
@@ -103,7 +112,22 @@ def process_webhook_request(*, payload: dict, request, channel: str):
         )
 
         audio_file = request.FILES.get("audio") or request.FILES.get("voice")
-        if audio_file is not None:
+        has_unsupported_media = payload.get("unsupported_media", False) or (
+            bool(request.FILES) and audio_file is None
+        )
+        if has_unsupported_media:
+            store_message(
+                business_id=business_id,
+                client=client,
+                channel=channel,
+                role=ConversationMessage.Role.ASSISTANT,
+                content=UNSUPPORTED_MEDIA_MESSAGE,
+            )
+            result = {
+                "reply": UNSUPPORTED_MEDIA_MESSAGE,
+                "escalated": False,
+            }
+        elif audio_file is not None:
             result = handle_audio_message(
                 business_id=business_id,
                 channel=channel,
@@ -130,6 +154,27 @@ def verify_outbound_callback_token(token: str):
         raise ValidationError("Outbound callback secret is not configured.")
     if token != expected_token:
         raise ValidationError("Invalid outbound callback secret.")
+
+
+def is_celery_eager_mode() -> bool:
+    value = settings.CELERY_TASK_ALWAYS_EAGER
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def check_broker_connection() -> bool:
+    if is_celery_eager_mode():
+        return True
+    try:
+        redis.from_url(
+            settings.CELERY_BROKER_URL,
+            socket_connect_timeout=2,
+            socket_timeout=2,
+        ).ping()
+    except Exception:
+        return False
+    return True
 
 
 @csrf_exempt
@@ -261,6 +306,7 @@ def outbound_delivery_webhook(request):
                 channel=outbound_message.channel,
                 payload=payload,
             )
+            sync_booking_delivery_marker(outbound_message)
         return JsonResponse(
             {
                 "outbound_message_id": outbound_message.id,
@@ -281,9 +327,15 @@ def healthcheck(request):
     except Exception:
         db_ok = False
 
+    broker_ok = check_broker_connection()
+
     checks = {
         "database": "ok" if db_ok else "failed",
-        "broker_configured": "ok" if settings.CELERY_BROKER_URL else "failed",
+        "broker": "ok" if broker_ok else "failed",
+        "celery_eager_mode": (
+            "degraded" if is_celery_eager_mode() else "ok"
+        ),
+        "beat_scheduler": "ok" if settings.CELERY_BEAT_SCHEDULER else "failed",
         "openai_configured": "ok" if settings.OPENAI_API_KEY else "degraded",
         "telegram_transport": (
             "ok" if settings.TELEGRAM_BOT_TOKEN else "degraded"
@@ -301,5 +353,19 @@ def healthcheck(request):
             "ok" if settings.INTERNAL_ALERT_WEBHOOK_URL else "degraded"
         ),
     }
-    overall_status = "ok" if checks["database"] == "ok" else "failed"
-    return JsonResponse({"status": overall_status, "checks": checks}, status=200 if db_ok else 503)
+    celery_queues = {
+        "default_queue": getattr(settings, "CELERY_TASK_DEFAULT_QUEUE", "celery"),
+        "routes": {
+            task_name: route.get("queue", getattr(settings, "CELERY_TASK_DEFAULT_QUEUE", "celery"))
+            for task_name, route in getattr(settings, "CELERY_TASK_ROUTES", {}).items()
+        },
+    }
+    overall_status = "ok" if db_ok and broker_ok else "failed"
+    return JsonResponse(
+        {
+            "status": overall_status,
+            "checks": checks,
+            "celery": celery_queues,
+        },
+        status=200 if overall_status == "ok" else 503,
+    )

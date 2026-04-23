@@ -5,6 +5,7 @@ os.environ.setdefault(
     "DJANGO_SECRET_KEY",
     "test-secret-key-for-jwt-signing-with-safe-length-1234567890",
 )
+os.environ.setdefault("DATABASE_URL", "sqlite:///test_db.sqlite3")
 
 from .base import *  # noqa: F403,F401
 
