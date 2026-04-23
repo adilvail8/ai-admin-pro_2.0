@@ -12,7 +12,7 @@ from django.views.decorators.http import require_POST
 
 from .audit import create_audit_log
 from .models import ConversationMessage, OutboundMessage
-from .tasks import sync_booking_delivery_marker
+from .tasks import mark_outbound_as_failed, sync_booking_delivery_marker
 from .webhooks import (
     get_business,
     get_or_create_client,
@@ -283,10 +283,28 @@ def outbound_delivery_webhook(request):
         payload = parse_request_payload(request)
         provider_message_id = str(payload["provider_message_id"]).strip()
         delivery_status = str(payload["status"]).strip().lower()
-        outbound_message = OutboundMessage.objects.get(
+        outbound_messages = OutboundMessage.objects.filter(
             provider_message_id=provider_message_id
         )
+        channel = str(payload.get("channel", "")).strip()
+        if channel:
+            outbound_messages = outbound_messages.filter(channel=channel)
+        business_id = payload.get("business_id")
+        if business_id:
+            outbound_messages = outbound_messages.filter(business_id=business_id)
+        outbound_message = outbound_messages.order_by("-created_at").first()
+        if outbound_message is None:
+            raise OutboundMessage.DoesNotExist
+
         if delivery_status == "delivered":
+            if outbound_message.status == OutboundMessage.Status.DELIVERED:
+                return JsonResponse(
+                    {
+                        "outbound_message_id": outbound_message.id,
+                        "status": outbound_message.status,
+                    },
+                    status=200,
+                )
             outbound_message.status = OutboundMessage.Status.DELIVERED
             outbound_message.delivered_at = outbound_message.delivered_at or timezone.now()
             outbound_message.provider_response = {
@@ -307,6 +325,29 @@ def outbound_delivery_webhook(request):
                 payload=payload,
             )
             sync_booking_delivery_marker(outbound_message)
+        elif delivery_status in {"failed", "failure", "undelivered", "rejected", "error"}:
+            if outbound_message.status != OutboundMessage.Status.DELIVERED:
+                retry_context = mark_outbound_as_failed(
+                    outbound_message,
+                    error_code=str(
+                        payload.get("error_code")
+                        or f"provider_{delivery_status}"
+                    ),
+                    error_message=str(
+                        payload.get("error_message")
+                        or payload.get("description")
+                        or "Provider reported message delivery failure."
+                    ),
+                )
+                outbound_message.refresh_from_db()
+                outbound_message.provider_response = {
+                    **outbound_message.provider_response,
+                    "delivery_callback": payload,
+                    "retry": retry_context or {},
+                }
+                outbound_message.save(
+                    update_fields=["provider_response", "updated_at"]
+                )
         return JsonResponse(
             {
                 "outbound_message_id": outbound_message.id,
@@ -314,7 +355,13 @@ def outbound_delivery_webhook(request):
             },
             status=200,
         )
-    except (KeyError, ValueError, ValidationError, json.JSONDecodeError, OutboundMessage.DoesNotExist) as error:
+    except (
+        KeyError,
+        ValueError,
+        ValidationError,
+        json.JSONDecodeError,
+        OutboundMessage.DoesNotExist,
+    ) as error:
         return JsonResponse({"detail": str(error)}, status=400)
 
 

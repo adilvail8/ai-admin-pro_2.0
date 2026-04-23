@@ -237,7 +237,7 @@ def process_incoming_message(
         raise ValidationError("Message text is required.")
 
     business = get_business(business_id=business_id)
-    ai_manager = ai_manager or AIManager(business=business)
+    ai_manager = ai_manager or AIManager(business=business, client=client)
     enforce_client_rate_limit(
         business_id=business_id,
         client=client,
@@ -379,7 +379,7 @@ def handle_audio_message(
         raise ValidationError("Audio file is too large.")
 
     business = get_business(business_id=business_id)
-    ai_manager = ai_manager or AIManager(business=business)
+    ai_manager = ai_manager or AIManager(business=business, client=client)
     transcript = ai_manager.handle_voice_message(file_obj=audio_file)
     if transcript == VOICE_FALLBACK_MESSAGE:
         store_message(

@@ -221,6 +221,11 @@ class AIManager:
             raise
 
     def execute_tool_call(self, *, function_name: str, payload: dict):
+        payload = dict(payload)
+        if self.business is not None:
+            payload["business_id"] = self.business.id
+        if function_name == "create_appointment" and self.client is not None:
+            payload["client_id"] = self.client.id
         return execute_ai_function(
             function_name=function_name,
             payload=payload,

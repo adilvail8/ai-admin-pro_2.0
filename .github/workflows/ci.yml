@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - reconcile
+  pull_request:
+
+jobs:
+  test:
+    name: Django Postgres Redis Smoke
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: ai_admin_pro
+          POSTGRES_USER: adil_admin
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U adil_admin -d ai_admin_pro"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      DJANGO_SETTINGS_MODULE: config.settings.ci
+      DJANGO_SECRET_KEY: ci-secret-key-with-safe-length-1234567890
+      DEBUG: "False"
+      TIME_ZONE: Asia/Almaty
+      ALLOWED_HOSTS: localhost,127.0.0.1,testserver
+      CSRF_TRUSTED_ORIGINS: http://localhost,http://127.0.0.1
+      DB_NAME: ai_admin_pro
+      DB_USER: adil_admin
+      DB_PASSWORD: postgres
+      DB_HOST: 127.0.0.1
+      DB_PORT: "5432"
+      DB_CONN_MAX_AGE: "0"
+      CELERY_BROKER_URL: redis://127.0.0.1:6379/0
+      CELERY_RESULT_BACKEND: redis://127.0.0.1:6379/0
+      CELERY_TASK_ALWAYS_EAGER: "True"
+      OPENAI_API_KEY: sk-fake-ci-openai-key
+      OPENAI_MODEL: gpt-4o-mini
+      OPENAI_TRANSCRIPTION_MODEL: whisper-1
+      WEBHOOK_SHARED_SECRET: ci-webhook-secret
+      TELEGRAM_WEBHOOK_SECRET: ci-telegram-secret
+      TELEGRAM_BOT_TOKEN: "123456:fake-ci-telegram-token"
+      GREEN_API_SHARED_SECRET: ci-green-secret
+      GREEN_API_ALLOWED_IPS: 127.0.0.1
+      GREEN_API_URL: https://example.invalid
+      GREEN_API_INSTANCE_ID: ci-instance
+      GREEN_API_API_TOKEN: ci-green-token
+      INTERNAL_ALERT_WEBHOOK_URL: https://example.invalid/internal-alert
+      INTERNAL_ALERT_WEBHOOK_TOKEN: ci-internal-alert-token
+      OUTBOUND_CALLBACK_SECRET: ci-outbound-secret
+      MAX_MESSAGES_PER_MINUTE: "8"
+      MAX_OUTBOUND_ATTEMPTS: "3"
+      OUTBOUND_TRANSPORT_TIMEOUT_SECONDS: "10"
+      API_USER_RATE: 60/minute
+      API_ANON_RATE: 10/minute
+      ADMIN_URL_PATH: secure-admin/
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Verify dependency graph
+        run: python -m pip check
+
+      - name: Check PostgreSQL connectivity
+        run: python manage.py check_postgres
+
+      - name: Run migrations on empty PostgreSQL database
+        run: python manage.py migrate --noinput
+
+      - name: Verify migration files are current
+        run: python manage.py makemigrations --check --dry-run
+
+      - name: Run Django system checks
+        run: python manage.py check
+
+      - name: Run Django deploy checks
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings.production
+          SECURE_SSL_REDIRECT: "True"
+          SECURE_HSTS_SECONDS: "31536000"
+        run: python manage.py check --deploy
+
+      - name: Run pytest against PostgreSQL
+        run: python -m pytest --ds=config.settings.ci

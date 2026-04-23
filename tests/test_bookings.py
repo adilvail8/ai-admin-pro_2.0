@@ -6,6 +6,7 @@ import pytest
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import IntegrityError, transaction
 from django.test import override_settings
 from django.utils import timezone
 
@@ -419,6 +420,45 @@ def test_execute_ai_function_serializes_slots_to_json_payload(
 
 
 @pytest.mark.django_db
+def test_ai_manager_overrides_tool_payload_scope(
+    business,
+    client_profile,
+    another_business,
+    monkeypatch,
+):
+    captured_payload = {}
+
+    def fake_execute_ai_function(*, function_name, payload):
+        captured_payload.update(payload)
+        return {"ok": True}
+
+    monkeypatch.setattr(
+        "apps.bookings.ai_manager.execute_ai_function",
+        fake_execute_ai_function,
+    )
+
+    ai_manager = AIManager(
+        business=business,
+        client=client_profile,
+        model="test-model",
+    )
+    ai_manager.execute_tool_call(
+        function_name="create_appointment",
+        payload={
+            "business_id": another_business.id,
+            "client_id": 999999,
+            "master_id": 1,
+            "service_id": 1,
+            "start_time": (timezone.now() + timedelta(days=1)).isoformat(),
+            "client_data": {},
+        },
+    )
+
+    assert captured_payload["business_id"] == business.id
+    assert captured_payload["client_id"] == client_profile.id
+
+
+@pytest.mark.django_db
 def test_create_appointment_rejects_past_time_explicitly(
     business,
     client_profile,
@@ -692,6 +732,45 @@ def test_reminder_task_reuses_failed_outbound_instead_of_creating_duplicate(
 
 
 @pytest.mark.django_db
+def test_scheduled_outbound_message_is_unique_per_booking_and_type(
+    business,
+    client_profile,
+    master,
+    service,
+):
+    booking = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(hours=1, minutes=30),
+        client_data={"name": client_profile.name},
+        status=Booking.Status.CONFIRMED,
+    )
+    OutboundMessage.objects.create(
+        business=business,
+        client=client_profile,
+        booking=booking,
+        channel="whatsapp",
+        recipient=str(client_profile.phone),
+        message_type="reminder",
+        text="Reminder",
+    )
+
+    with pytest.raises(IntegrityError):
+        with transaction.atomic():
+            OutboundMessage.objects.create(
+                business=business,
+                client=client_profile,
+                booking=booking,
+                channel="whatsapp",
+                recipient=str(client_profile.phone),
+                message_type="reminder",
+                text="Duplicate reminder",
+            )
+
+
+@pytest.mark.django_db
 def test_outbound_retry_cancels_expired_reminder_before_transport_call(
     business,
     client_profile,
@@ -913,6 +992,52 @@ def test_outbound_delivery_webhook_marks_message_as_delivered(
 
 
 @pytest.mark.django_db
+@override_settings(
+    OUTBOUND_CALLBACK_SECRET="callback-secret",
+    CELERY_TASK_ALWAYS_EAGER=True,
+)
+def test_outbound_delivery_webhook_marks_provider_failure(
+    client,
+    business,
+    client_profile,
+):
+    outbound_message = OutboundMessage.objects.create(
+        business=business,
+        client=client_profile,
+        channel="whatsapp",
+        recipient=client_profile.whatsapp_id or str(client_profile.phone),
+        message_type="reminder",
+        text="Reminder",
+        status=OutboundMessage.Status.SUBMITTED,
+        provider_message_id="provider-failed-123",
+        provider_response={"accepted": True},
+        submitted_at=timezone.now(),
+        attempts=1,
+    )
+
+    response = client.post(
+        "/api/v1/webhooks/outbound-delivery/",
+        data=json.dumps(
+            {
+                "provider_message_id": "provider-failed-123",
+                "status": "failed",
+                "error_code": "recipient_unreachable",
+                "error_message": "Recipient is not reachable.",
+            }
+        ),
+        content_type="application/json",
+        HTTP_X_OUTBOUND_CALLBACK_SECRET="callback-secret",
+    )
+
+    outbound_message.refresh_from_db()
+
+    assert response.status_code == 200
+    assert outbound_message.status == OutboundMessage.Status.FAILED
+    assert outbound_message.error_code == "recipient_unreachable"
+    assert outbound_message.provider_response["delivery_callback"]["status"] == "failed"
+
+
+@pytest.mark.django_db
 def test_healthcheck_returns_ok(client):
     response = client.get("/api/v1/health/")
 
@@ -1076,7 +1201,7 @@ def test_handle_audio_message_does_not_duplicate_user_message(
 ):
     monkeypatch.setattr(
         "apps.bookings.webhooks.AIManager",
-        lambda business=None: StubAIManager(reply="Принято"),
+        lambda **kwargs: StubAIManager(reply="Принято"),
     )
     response = handle_audio_message(
         business_id=business.id,

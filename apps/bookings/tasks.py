@@ -3,6 +3,7 @@ from datetime import timedelta
 
 from celery import shared_task
 from django.conf import settings
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from .ai_manager import AIManager
@@ -51,10 +52,13 @@ def get_or_create_outbound_message(
     message_type: str,
     text: str,
 ):
+    lookup = {
+        "booking": booking,
+        "message_type": message_type,
+    }
     existing_message = (
         OutboundMessage.objects.filter(
-            booking=booking,
-            message_type=message_type,
+            **lookup,
             status__in=[
                 OutboundMessage.Status.QUEUED,
                 OutboundMessage.Status.SUBMITTED,
@@ -70,18 +74,22 @@ def get_or_create_outbound_message(
     if existing_message is not None:
         return existing_message, False
 
-    return (
-        OutboundMessage.objects.create(
-            business=booking.business,
-            client=booking.client,
-            booking=booking,
-            channel=channel,
-            recipient=recipient,
-            message_type=message_type,
-            text=text,
-        ),
-        True,
-    )
+    try:
+        with transaction.atomic():
+            return (
+                OutboundMessage.objects.create(
+                    business=booking.business,
+                    client=booking.client,
+                    booking=booking,
+                    channel=channel,
+                    recipient=recipient,
+                    message_type=message_type,
+                    text=text,
+                ),
+                True,
+            )
+    except IntegrityError:
+        return OutboundMessage.objects.get(**lookup), False
 
 
 def build_existing_outbound_result(outbound_message: OutboundMessage) -> dict:
@@ -200,7 +208,12 @@ def schedule_outbound_retry(outbound_message: OutboundMessage):
     }
 
 
-def mark_outbound_as_failed(outbound_message: OutboundMessage, *, error_code: str, error_message: str):
+def mark_outbound_as_failed(
+    outbound_message: OutboundMessage,
+    *,
+    error_code: str,
+    error_message: str,
+):
     max_attempts = settings.MAX_OUTBOUND_ATTEMPTS
     outbound_message.error_code = error_code
     outbound_message.last_error = error_message

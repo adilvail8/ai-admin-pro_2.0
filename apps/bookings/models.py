@@ -581,6 +581,16 @@ class OutboundMessage(TimeStampedModel):
             models.Index(fields=("booking", "message_type", "status")),
             models.Index(fields=("status", "created_at")),
         ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=("booking", "message_type"),
+                condition=Q(
+                    booking__isnull=False,
+                    message_type__in=("reminder", "follow_up"),
+                ),
+                name="uniq_booking_scheduled_outbound",
+            ),
+        ]
 
 
 class AuditLog(TimeStampedModel):
