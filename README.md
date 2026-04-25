@@ -39,8 +39,18 @@ Base path: `/api/v1/`
 - `POST /api/v1/auth/token/refresh/` - refresh access token
 - `GET /api/v1/auth/me/` - current authenticated user
 - `GET /api/v1/memberships/` - list business memberships
-- `GET /api/v1/bookings/` - list bookings available to the authenticated user
-- `GET /api/v1/outbound-messages/` - list outbound messages available to the authenticated user
+- `GET /api/v1/businesses/<business_id>/bookings/` - list bookings for one business
+- `POST /api/v1/businesses/<business_id>/bookings/` - create booking in one business
+- `GET /api/v1/businesses/<business_id>/bookings/<pk>/` - booking detail
+- `PATCH /api/v1/businesses/<business_id>/bookings/<pk>/reschedule/` - reschedule booking
+- `PATCH /api/v1/businesses/<business_id>/bookings/<pk>/status/` - update booking status
+- `GET /api/v1/businesses/<business_id>/outbound-messages/` - list outbound messages for one business
+- `GET /api/v1/schema/` - OpenAPI schema
+- `GET /api/v1/schema/swagger-ui/` - Swagger UI
+
+Detailed frontend-facing contract:
+
+- [docs/operator-ui-api-contract.md](F:\django-sprint4-main\ai-admin-pro_2.0-main\docs\operator-ui-api-contract.md)
 
 ## Webhooks And Ops
 
@@ -67,6 +77,11 @@ external CRM integration.
 ## Environment Variables
 
 Main variables are documented in `.env.example`.
+
+Frontend/dev variables:
+
+- `CORS_ALLOWED_ORIGINS=http://127.0.0.1:3000,http://localhost:3000`
+- `API_PAGE_SIZE=50`
 
 Recommended PostgreSQL setup:
 

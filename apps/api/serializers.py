@@ -1,4 +1,5 @@
 from django.contrib.auth import get_user_model
+from datetime import date
 from django.utils import timezone
 from rest_framework import serializers
 
@@ -34,10 +35,25 @@ class BusinessSerializer(serializers.ModelSerializer):
             "city",
             "address",
             "working_hours",
-            "ai_rules",
             "timezone_name",
             "is_active",
         )
+
+
+class BusinessDetailSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Business
+        fields = (
+            "id",
+            "name",
+            "brand_name",
+            "city",
+            "address",
+            "working_hours",
+            "timezone_name",
+            "is_active",
+        )
+        read_only_fields = fields
 
 
 class BusinessMembershipSerializer(serializers.ModelSerializer):
@@ -79,6 +95,86 @@ class BookingReadSerializer(serializers.ModelSerializer):
             "updated_at",
         )
         read_only_fields = fields
+
+
+class MasterListSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Master
+        fields = (
+            "id",
+            "full_name",
+            "specialization",
+            "working_hours",
+            "is_active",
+        )
+        read_only_fields = fields
+
+
+class ServiceListSerializer(serializers.ModelSerializer):
+    category_id = serializers.IntegerField(source="category.id", read_only=True)
+    category_name = serializers.CharField(source="category.name", read_only=True)
+
+    class Meta:
+        model = Service
+        fields = (
+            "id",
+            "name",
+            "category_id",
+            "category_name",
+            "price",
+            "duration",
+            "buffer_time",
+            "is_active",
+        )
+        read_only_fields = fields
+
+
+class ClientListSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Client
+        fields = (
+            "id",
+            "name",
+            "phone",
+            "telegram_id",
+            "whatsapp_id",
+            "allow_follow_up",
+            "is_active",
+            "created_at",
+        )
+        read_only_fields = fields
+
+
+class ClientDetailSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Client
+        fields = (
+            "id",
+            "name",
+            "phone",
+            "external_id",
+            "telegram_id",
+            "whatsapp_id",
+            "ai_failure_count",
+            "allow_follow_up",
+            "is_active",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = fields
+
+
+class AvailabilityQuerySerializer(serializers.Serializer):
+    date = serializers.DateField()
+    service_id = serializers.IntegerField(min_value=1)
+    master_id = serializers.IntegerField(min_value=1, required=False)
+
+
+class AvailabilitySlotSerializer(serializers.Serializer):
+    start_time = serializers.DateTimeField()
+    end_time = serializers.DateTimeField()
+    master_id = serializers.IntegerField()
+    master_name = serializers.CharField()
 
 
 class BookingWriteTenantScopeMixin:

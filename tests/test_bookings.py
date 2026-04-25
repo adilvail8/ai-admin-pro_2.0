@@ -1,9 +1,12 @@
 import json
-from datetime import time, timedelta
+import zoneinfo
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
+from django.contrib import messages
+from django.contrib.admin.sites import AdminSite
 from django.contrib.auth.models import AnonymousUser
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
@@ -21,6 +24,12 @@ from apps.api.permissions import (
     ROLE_HIERARCHY,
     BusinessAccessPermission,
     _roles_gte,
+)
+from apps.bookings.admin import (
+    BookingAdmin,
+    BusinessAdmin,
+    OutboundMessageAdmin,
+    ServiceAdmin,
 )
 from apps.api.serializers import (
     BookingCreateSerializer,
@@ -52,6 +61,7 @@ from apps.bookings.services import (
 )
 from apps.bookings.tasks import (
     notify_human_operator,
+    process_outbound_health_alerts,
     process_pending_reminders,
     send_booking_reminder,
     send_outbound_message,
@@ -183,6 +193,38 @@ class AcceptingTransport:
         )
 
 
+class InternalAlertAcceptingTransport:
+    def __init__(self):
+        self.calls = []
+
+    def send_text(self, *, recipient, text, metadata=None):
+        self.calls.append(
+            {
+                "recipient": recipient,
+                "text": text,
+                "metadata": metadata or {},
+            }
+        )
+        return SendResult(
+            accepted=True,
+            delivered=False,
+            provider_message_id="internal-alert-1",
+            raw_response={"recipient": recipient, "metadata": metadata or {}},
+        )
+
+
+def obtain_access_token(client, *, username="owner", password="StrongPass123!"):
+    response = client.post(
+        "/api/v1/auth/token/",
+        data=json.dumps(
+            {"username": username, "password": password}
+        ),
+        content_type="application/json",
+    )
+    assert response.status_code == 200
+    return response.json()["access"]
+
+
 @pytest.mark.django_db
 def test_client_phone_is_stored_in_e164_format(business):
     saved_client = Client.objects.create(
@@ -300,7 +342,7 @@ def test_get_available_slots_respects_buffer_time(
     )
 
     slots = get_available_slots(
-        business.id,
+        business,
         target_date=monday,
         service_id=service.id,
     )
@@ -310,6 +352,81 @@ def test_get_available_slots_respects_buffer_time(
     assert (10, 30) not in slot_starts
     assert (11, 0) not in slot_starts
     assert (11, 30) in slot_starts
+
+
+@pytest.mark.django_db
+def test_get_available_slots_rejects_foreign_master_id(
+    business,
+    another_business,
+    service,
+):
+    foreign_master = Master.objects.create(
+        business=another_business,
+        full_name="Foreign Master",
+        specialization="Stylist",
+        is_active=True,
+    )
+
+    with pytest.raises(ValidationError):
+        get_available_slots(
+            business,
+            target_date=timezone.localdate() + timedelta(days=1),
+            service_id=service.id,
+            master_id=foreign_master.id,
+        )
+
+
+@pytest.mark.django_db
+def test_get_available_slots_applies_business_rules_for_blocked_master_service_pair(
+    business,
+    master,
+    service,
+):
+    business.ai_rules = {
+        "blocked_master_service_pairs": [
+            {"master_id": master.id, "service_id": service.id}
+        ]
+    }
+    business.save(update_fields=["ai_rules", "updated_at"])
+
+    with pytest.raises(
+        ValidationError,
+        match="This master cannot be booked for the selected service.",
+    ):
+        get_available_slots(
+            business,
+            target_date=timezone.localdate() + timedelta(days=1),
+            service_id=service.id,
+            master_id=master.id,
+        )
+
+
+@pytest.mark.django_db
+def test_get_available_slots_filters_past_slots_using_business_timezone(
+    business,
+    master,
+    service,
+    monkeypatch,
+):
+    business.timezone_name = "Asia/Almaty"
+    business.save(update_fields=["timezone_name", "updated_at"])
+    target_date = date(2026, 4, 27)
+    fixed_now = datetime(2026, 4, 27, 5, 15, tzinfo=zoneinfo.ZoneInfo("UTC"))
+
+    monkeypatch.setattr("apps.bookings.services.timezone.now", lambda: fixed_now)
+
+    slots = get_available_slots(
+        business,
+        target_date=target_date,
+        service_id=service.id,
+        master_id=master.id,
+    )
+
+    slot_starts = {(slot.start.hour, slot.start.minute) for slot in slots}
+    assert (9, 0) not in slot_starts
+    assert (9, 30) not in slot_starts
+    assert (10, 0) not in slot_starts
+    assert (10, 30) in slot_starts
 
 
 @pytest.mark.django_db
@@ -1719,7 +1836,11 @@ def test_bookings_api_is_scoped_by_business_membership(
     )
 
     assert bookings_response.status_code == 200
-    assert bookings_response.json()[0]["id"] == booking.id
+    payload = bookings_response.json()
+    assert payload["count"] == 1
+    assert payload["next"] is None
+    assert payload["previous"] is None
+    assert payload["results"][0]["id"] == booking.id
 
 
 @pytest.mark.django_db
@@ -2649,6 +2770,468 @@ def test_process_pending_reminders_queues_due_tasks(
 
 
 @pytest.mark.django_db
+@override_settings(
+    INTERNAL_ALERT_WEBHOOK_URL="https://alerts.example.test",
+    OUTBOUND_ALERT_FAILED_THRESHOLD=2,
+    OUTBOUND_ALERT_DEAD_LETTER_THRESHOLD=1,
+    OUTBOUND_ALERT_LOOKBACK_MINUTES=60,
+)
+def test_process_outbound_health_alerts_sends_internal_alert(
+    business,
+    client_profile,
+    master,
+    service,
+    monkeypatch,
+):
+    alert_transport = InternalAlertAcceptingTransport()
+    monkeypatch.setattr(
+        "apps.bookings.tasks.get_transport_for_channel",
+        lambda channel: alert_transport,
+    )
+    monkeypatch.setattr(
+        "apps.bookings.tasks.claim_outbound_alert_cooldown",
+        lambda **kwargs: True,
+    )
+
+    base_time = timezone.now() - timedelta(minutes=10)
+    failed_message = OutboundMessage.objects.create(
+        business=business,
+        client=client_profile,
+        booking=Booking.objects.create(
+            business=business,
+            client=client_profile,
+            master=master,
+            service=service,
+            start_time=timezone.now() + timedelta(days=1),
+            client_data={"name": client_profile.name},
+            status=Booking.Status.CONFIRMED,
+        ),
+        channel="whatsapp",
+        recipient="+77071234567",
+        message_type="reminder",
+        text="failed-1",
+        status=OutboundMessage.Status.FAILED,
+    )
+    second_failed_message = OutboundMessage.objects.create(
+        business=business,
+        client=client_profile,
+        channel="telegram",
+        recipient="12345",
+        message_type="follow_up",
+        text="failed-2",
+        status=OutboundMessage.Status.FAILED,
+    )
+    dead_letter_message = OutboundMessage.objects.create(
+        business=business,
+        client=client_profile,
+        channel="whatsapp",
+        recipient="+77071234567",
+        message_type="follow_up",
+        text="dead-letter",
+        status=OutboundMessage.Status.DEAD_LETTER,
+        dead_lettered_at=timezone.now() - timedelta(minutes=5),
+    )
+    OutboundMessage.objects.filter(pk=failed_message.pk).update(updated_at=base_time)
+    OutboundMessage.objects.filter(pk=second_failed_message.pk).update(
+        updated_at=base_time
+    )
+
+    result = process_outbound_health_alerts()
+
+    assert result["alerts_sent"] == 1
+    assert len(alert_transport.calls) == 1
+    assert alert_transport.calls[0]["metadata"]["failed_count"] == 2
+    assert alert_transport.calls[0]["metadata"]["dead_letter_count"] == 1
+    assert AuditLog.objects.filter(
+        business=business,
+        event_type="outbound_health_alert_sent",
+    ).exists()
+    dead_letter_message.refresh_from_db()
+    assert dead_letter_message.dead_lettered_at is not None
+
+
+@pytest.mark.django_db
+@override_settings(
+    INTERNAL_ALERT_WEBHOOK_URL="https://alerts.example.test",
+    OUTBOUND_ALERT_FAILED_THRESHOLD=1,
+    OUTBOUND_ALERT_DEAD_LETTER_THRESHOLD=1,
+)
+def test_process_outbound_health_alerts_respects_redis_cooldown(
+    business,
+    client_profile,
+    monkeypatch,
+):
+    alert_transport = InternalAlertAcceptingTransport()
+    monkeypatch.setattr(
+        "apps.bookings.tasks.get_transport_for_channel",
+        lambda channel: alert_transport,
+    )
+    monkeypatch.setattr(
+        "apps.bookings.tasks.claim_outbound_alert_cooldown",
+        lambda **kwargs: False,
+    )
+
+    outbound_message = OutboundMessage.objects.create(
+        business=business,
+        client=client_profile,
+        channel="whatsapp",
+        recipient="+77071234567",
+        message_type="reminder",
+        text="failed",
+        status=OutboundMessage.Status.FAILED,
+    )
+    OutboundMessage.objects.filter(pk=outbound_message.pk).update(
+        updated_at=timezone.now() - timedelta(minutes=5)
+    )
+
+    result = process_outbound_health_alerts()
+
+    assert result["alerts_sent"] == 0
+    assert result["alerts_skipped"] == 1
+    assert alert_transport.calls == []
+    assert not AuditLog.objects.filter(
+        business=business,
+        event_type="outbound_health_alert_sent",
+    ).exists()
+
+
+@pytest.mark.django_db
+@override_settings(
+    INTERNAL_ALERT_WEBHOOK_URL="https://alerts.example.test",
+    OUTBOUND_ALERT_FAILED_THRESHOLD=1,
+    OUTBOUND_ALERT_DEAD_LETTER_THRESHOLD=1,
+    OUTBOUND_ALERT_LOOKBACK_MINUTES=60,
+)
+def test_process_outbound_health_alerts_uses_delivery_timestamps_not_created_at(
+    business,
+    client_profile,
+    monkeypatch,
+):
+    alert_transport = InternalAlertAcceptingTransport()
+    monkeypatch.setattr(
+        "apps.bookings.tasks.get_transport_for_channel",
+        lambda channel: alert_transport,
+    )
+    monkeypatch.setattr(
+        "apps.bookings.tasks.claim_outbound_alert_cooldown",
+        lambda **kwargs: True,
+    )
+
+    stale_failed = OutboundMessage.objects.create(
+        business=business,
+        client=client_profile,
+        channel="whatsapp",
+        recipient="+77071234567",
+        message_type="reminder",
+        text="old-created-new-failed",
+        status=OutboundMessage.Status.FAILED,
+    )
+    stale_dead_letter = OutboundMessage.objects.create(
+        business=business,
+        client=client_profile,
+        channel="telegram",
+        recipient="12345",
+        message_type="follow_up",
+        text="old-created-new-dead-letter",
+        status=OutboundMessage.Status.DEAD_LETTER,
+        dead_lettered_at=timezone.now() - timedelta(minutes=10),
+    )
+    old_timestamp = timezone.now() - timedelta(hours=3)
+    OutboundMessage.objects.filter(pk__in=[stale_failed.pk, stale_dead_letter.pk]).update(
+        created_at=old_timestamp
+    )
+    OutboundMessage.objects.filter(pk=stale_failed.pk).update(
+        updated_at=timezone.now() - timedelta(minutes=10)
+    )
+
+    result = process_outbound_health_alerts()
+
+    assert result["alerts_sent"] == 1
+    assert len(alert_transport.calls) == 1
+    assert alert_transport.calls[0]["metadata"]["failed_count"] == 1
+    assert alert_transport.calls[0]["metadata"]["dead_letter_count"] == 1
+
+
+@pytest.mark.django_db
+def test_business_admin_scopes_queryset_to_membership(
+    business,
+    another_business,
+    owner_user,
+):
+    BusinessMembership.objects.create(
+        user=owner_user,
+        business=business,
+        role=BusinessMembership.Role.OWNER,
+    )
+    BusinessMembership.objects.create(
+        user=owner_user,
+        business=another_business,
+        role=BusinessMembership.Role.STAFF,
+    )
+    request = APIRequestFactory().get("/secure-admin/bookings/business/")
+    request.user = owner_user
+
+    queryset = BusinessAdmin(Business, AdminSite()).get_queryset(request)
+
+    assert list(queryset) == [business]
+
+
+@pytest.mark.django_db
+def test_booking_admin_scopes_queryset_and_permissions(
+    business,
+    another_business,
+    owner_user,
+    client_profile,
+    master,
+    service,
+):
+    request = APIRequestFactory().get("/secure-admin/bookings/booking/")
+    request.user = owner_user
+    BusinessMembership.objects.create(
+        user=owner_user,
+        business=business,
+        role=BusinessMembership.Role.OWNER,
+    )
+
+    own_booking = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(days=1),
+        client_data={"name": client_profile.name},
+    )
+    foreign_client = Client.objects.create(
+        business=another_business,
+        name="Foreign",
+        phone="+77070000077",
+    )
+    foreign_master = Master.objects.create(
+        business=another_business,
+        full_name="Foreign Master",
+        specialization="Stylist",
+    )
+    foreign_service = Service.objects.create(
+        business=another_business,
+        name="Foreign service",
+        price=Decimal("20.00"),
+        duration=timedelta(minutes=30),
+    )
+    foreign_booking = Booking.objects.create(
+        business=another_business,
+        client=foreign_client,
+        master=foreign_master,
+        service=foreign_service,
+        start_time=timezone.now() + timedelta(days=2),
+        client_data={"name": foreign_client.name},
+    )
+
+    admin_instance = BookingAdmin(Booking, AdminSite())
+    queryset = admin_instance.get_queryset(request)
+
+    assert list(queryset) == [own_booking]
+    assert admin_instance.has_view_permission(request, own_booking) is True
+    assert admin_instance.has_view_permission(request, foreign_booking) is False
+
+
+@pytest.mark.django_db
+def test_service_admin_limits_business_foreign_key_choices(
+    business,
+    another_business,
+    owner_user,
+):
+    BusinessMembership.objects.create(
+        user=owner_user,
+        business=business,
+        role=BusinessMembership.Role.OWNER,
+    )
+    own_category = Category.objects.create(
+        business=business,
+        name="Own category",
+    )
+    Category.objects.create(
+        business=another_business,
+        name="Foreign category",
+    )
+    request = APIRequestFactory().get("/secure-admin/bookings/service/add/")
+    request.user = owner_user
+
+    form_field = ServiceAdmin(Service, AdminSite()).formfield_for_foreignkey(
+        Service._meta.get_field("category"),
+        request,
+    )
+
+    assert list(form_field.queryset) == [own_category]
+
+
+@pytest.mark.django_db
+def test_booking_admin_mark_confirmed_action_updates_status_and_audit(
+    business,
+    owner_user,
+    client_profile,
+    master,
+    service,
+):
+    BusinessMembership.objects.create(
+        user=owner_user,
+        business=business,
+        role=BusinessMembership.Role.OWNER,
+    )
+    booking = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(days=1),
+        client_data={"name": client_profile.name},
+        status=Booking.Status.PENDING,
+    )
+    request = APIRequestFactory().post("/secure-admin/bookings/booking/")
+    request.user = owner_user
+
+    messages_sent = []
+    admin_instance = BookingAdmin(Booking, AdminSite())
+    admin_instance.message_user = (
+        lambda request, message, level=messages.INFO: messages_sent.append(
+            (message, level)
+        )
+    )
+
+    admin_instance.mark_confirmed(request, Booking.objects.filter(pk=booking.pk))
+    booking.refresh_from_db()
+
+    assert booking.status == Booking.Status.CONFIRMED
+    assert AuditLog.objects.filter(
+        booking=booking,
+        event_type="admin_booking_status_action",
+    ).exists()
+    assert messages_sent[0][0] == "1 booking(s) marked as confirmed."
+
+
+@pytest.mark.django_db
+def test_outbound_message_admin_retry_only_dispatches_failed_messages(
+    business,
+    owner_user,
+    client_profile,
+    monkeypatch,
+):
+    BusinessMembership.objects.create(
+        user=owner_user,
+        business=business,
+        role=BusinessMembership.Role.OWNER,
+    )
+    failed_message = OutboundMessage.objects.create(
+        business=business,
+        client=client_profile,
+        channel="whatsapp",
+        recipient="+77071234567",
+        message_type="follow_up",
+        text="retry me",
+        status=OutboundMessage.Status.FAILED,
+    )
+    delivered_message = OutboundMessage.objects.create(
+        business=business,
+        client=client_profile,
+        channel="whatsapp",
+        recipient="+77071234567",
+        message_type="reminder",
+        text="already delivered",
+        status=OutboundMessage.Status.DELIVERED,
+    )
+    request = APIRequestFactory().post("/secure-admin/bookings/outboundmessage/")
+    request.user = owner_user
+    dispatched_ids = []
+    messages_sent = []
+
+    monkeypatch.setattr(
+        "apps.bookings.tasks.dispatch_outbound_delivery",
+        lambda outbound_message_id: dispatched_ids.append(outbound_message_id),
+    )
+
+    admin_instance = OutboundMessageAdmin(OutboundMessage, AdminSite())
+    admin_instance.message_user = (
+        lambda request, message, level=messages.INFO: messages_sent.append(
+            (message, level)
+        )
+    )
+
+    admin_instance.retry_selected_messages(
+        request,
+        OutboundMessage.objects.filter(pk__in=[failed_message.pk, delivered_message.pk]),
+    )
+
+    assert dispatched_ids == [failed_message.id]
+    assert AuditLog.objects.filter(
+        outbound_message=failed_message,
+        event_type="outbound_retry_requested",
+    ).exists()
+    assert messages_sent[0][0] == (
+        "Queued retry for 1 outbound message(s). "
+        "Skipped 1 non-failed message(s)."
+    )
+
+
+@pytest.mark.django_db
+def test_outbound_message_admin_resend_resets_terminal_messages(
+    business,
+    owner_user,
+    client_profile,
+    monkeypatch,
+):
+    BusinessMembership.objects.create(
+        user=owner_user,
+        business=business,
+        role=BusinessMembership.Role.OWNER,
+    )
+    outbound_message = OutboundMessage.objects.create(
+        business=business,
+        client=client_profile,
+        channel="whatsapp",
+        recipient="+77071234567",
+        message_type="follow_up",
+        text="resend me",
+        status=OutboundMessage.Status.DEAD_LETTER,
+        attempts=3,
+        error_code="timeout",
+        last_error="provider timeout",
+        provider_message_id="provider-old",
+        provider_response={"old": True},
+        submitted_at=timezone.now() - timedelta(hours=1),
+        dead_lettered_at=timezone.now() - timedelta(minutes=5),
+    )
+    request = APIRequestFactory().post("/secure-admin/bookings/outboundmessage/")
+    request.user = owner_user
+    dispatched_ids = []
+
+    monkeypatch.setattr(
+        "apps.bookings.tasks.dispatch_outbound_delivery",
+        lambda outbound_message_id: dispatched_ids.append(outbound_message_id),
+    )
+
+    admin_instance = OutboundMessageAdmin(OutboundMessage, AdminSite())
+    admin_instance.message_user = lambda *args, **kwargs: None
+    admin_instance.resend_selected_messages(
+        request,
+        OutboundMessage.objects.filter(pk=outbound_message.pk),
+    )
+    outbound_message.refresh_from_db()
+
+    assert dispatched_ids == [outbound_message.id]
+    assert outbound_message.status == OutboundMessage.Status.QUEUED
+    assert outbound_message.attempts == 0
+    assert outbound_message.error_code == ""
+    assert outbound_message.last_error == ""
+    assert outbound_message.provider_message_id == ""
+    assert outbound_message.provider_response == {}
+    assert outbound_message.submitted_at is None
+    assert outbound_message.dead_lettered_at is None
+    assert AuditLog.objects.filter(
+        outbound_message=outbound_message,
+        event_type="outbound_resend_requested",
+    ).exists()
+
+
+@pytest.mark.django_db
 def test_send_booking_reminder_uses_whatsapp_when_only_phone_exists(
     business,
     master,
@@ -2683,3 +3266,570 @@ def test_send_booking_reminder_uses_whatsapp_when_only_phone_exists(
     assert result["status"] == OutboundMessage.Status.SUBMITTED
     assert outbound_message.channel == "whatsapp"
     assert outbound_message.recipient == "+77079999999"
+
+
+@pytest.mark.django_db
+def test_business_detail_api_returns_scoped_business(
+    client,
+    business,
+    business_membership,
+):
+    client.force_login(business_membership.user)
+
+    response = client.get(
+        f"/api/v1/businesses/{business.id}/",
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "id": business.id,
+        "name": business.name,
+        "brand_name": business.brand_name,
+        "city": business.city,
+        "address": business.address,
+        "working_hours": business.working_hours,
+        "timezone_name": business.timezone_name,
+        "is_active": business.is_active,
+    }
+
+
+@pytest.mark.django_db
+def test_business_detail_api_rejects_foreign_business_scope(
+    client,
+    business_membership,
+    another_business,
+):
+    client.force_login(business_membership.user)
+
+    response = client.get(
+        f"/api/v1/businesses/{another_business.id}/",
+    )
+
+    assert response.status_code == 403
+
+
+@pytest.mark.django_db
+def test_master_list_api_returns_only_active_business_masters(
+    client,
+    business,
+    business_membership,
+    another_business,
+):
+    active_master = Master.objects.create(
+        business=business,
+        full_name="Active Master",
+        specialization="Barber",
+        is_active=True,
+    )
+    Master.objects.create(
+        business=business,
+        full_name="Inactive Master",
+        specialization="Stylist",
+        is_active=False,
+    )
+    Master.objects.create(
+        business=another_business,
+        full_name="Foreign Master",
+        specialization="Colorist",
+        is_active=True,
+    )
+    client.force_login(business_membership.user)
+
+    response = client.get(
+        f"/api/v1/businesses/{business.id}/masters/",
+    )
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "id": active_master.id,
+            "full_name": active_master.full_name,
+            "specialization": active_master.specialization,
+            "working_hours": active_master.working_hours,
+            "is_active": True,
+        }
+    ]
+
+
+@pytest.mark.django_db
+def test_service_list_api_serializes_category_and_filters_inactive(
+    client,
+    business,
+    business_membership,
+):
+    category = Category.objects.create(
+        business=business,
+        name="Cuts",
+    )
+    active_service = Service.objects.create(
+        business=business,
+        category=category,
+        name="Buzz Cut",
+        price=Decimal("15.00"),
+        duration=timedelta(minutes=30),
+        buffer_time=timedelta(minutes=10),
+        is_active=True,
+    )
+    Service.objects.create(
+        business=business,
+        category=category,
+        name="Hidden Service",
+        price=Decimal("25.00"),
+        duration=timedelta(minutes=45),
+        is_active=False,
+    )
+    client.force_login(business_membership.user)
+
+    response = client.get(
+        f"/api/v1/businesses/{business.id}/services/",
+    )
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "id": active_service.id,
+            "name": active_service.name,
+            "category_id": category.id,
+            "category_name": category.name,
+            "price": "15.00",
+            "duration": "00:30:00",
+            "buffer_time": "00:10:00",
+            "is_active": True,
+        }
+    ]
+
+
+@pytest.mark.django_db
+def test_client_list_api_filters_by_business_and_search(
+    client,
+    business,
+    business_membership,
+    another_business,
+):
+    matching_client = Client.objects.create(
+        business=business,
+        name="Aruzhan",
+        phone="+77070001122",
+        whatsapp_id="wa-match",
+        telegram_id="tg-match",
+        allow_follow_up=True,
+        is_active=True,
+    )
+    Client.objects.create(
+        business=business,
+        name="Inactive Client",
+        phone="+77070001123",
+        is_active=False,
+    )
+    Client.objects.create(
+        business=another_business,
+        name="Foreign Match",
+        phone="+77070001124",
+        whatsapp_id="wa-match",
+        is_active=True,
+    )
+    client.force_login(business_membership.user)
+
+    response = client.get(
+        f"/api/v1/businesses/{business.id}/clients/?search=wa-match",
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+
+    assert payload["count"] == 1
+    assert payload["next"] is None
+    assert payload["previous"] is None
+    assert payload["results"][0]["id"] == matching_client.id
+    assert payload["results"][0]["name"] == matching_client.name
+    assert payload["results"][0]["phone"] == str(matching_client.phone)
+    assert payload["results"][0]["telegram_id"] == matching_client.telegram_id
+    assert payload["results"][0]["whatsapp_id"] == matching_client.whatsapp_id
+    assert payload["results"][0]["allow_follow_up"] is True
+    assert payload["results"][0]["is_active"] is True
+    assert "created_at" in payload["results"][0]
+
+
+@pytest.mark.django_db
+def test_client_detail_api_returns_scoped_client(
+    client,
+    business_membership,
+    client_profile,
+):
+    client.force_login(business_membership.user)
+
+    response = client.get(
+        f"/api/v1/businesses/{client_profile.business_id}/clients/{client_profile.id}/"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == client_profile.id
+    assert response.json()["name"] == client_profile.name
+    assert response.json()["phone"] == str(client_profile.phone)
+    assert response.json()["whatsapp_id"] == client_profile.whatsapp_id
+    assert response.json()["ai_failure_count"] == client_profile.ai_failure_count
+    assert "created_at" in response.json()
+    assert "updated_at" in response.json()
+
+
+@pytest.mark.django_db
+def test_client_detail_api_returns_404_for_foreign_client_pk(
+    client,
+    business,
+    business_membership,
+    another_business,
+):
+    foreign_client = Client.objects.create(
+        business=another_business,
+        name="Foreign Client",
+        phone="+77070009999",
+    )
+    client.force_login(business_membership.user)
+
+    response = client.get(
+        f"/api/v1/businesses/{business.id}/clients/{foreign_client.id}/"
+    )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.django_db
+def test_availability_api_returns_slots_for_business(
+    client,
+    business,
+    business_membership,
+    master,
+    service,
+):
+    client.force_login(business_membership.user)
+    days_until_monday = (7 - timezone.localdate().weekday()) % 7
+    monday = timezone.localdate() + timedelta(days=days_until_monday)
+
+    response = client.get(
+        f"/api/v1/businesses/{business.id}/availability/",
+        {
+            "date": monday.isoformat(),
+            "service_id": service.id,
+            "master_id": master.id,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload
+    assert {
+        "start_time",
+        "end_time",
+        "master_id",
+        "master_name",
+    } <= set(payload[0].keys())
+    assert payload[0]["master_id"] == master.id
+    assert payload[0]["master_name"] == master.full_name
+
+
+@pytest.mark.django_db
+def test_availability_api_rejects_foreign_master_id(
+    client,
+    business,
+    business_membership,
+    another_business,
+    service,
+):
+    foreign_master = Master.objects.create(
+        business=another_business,
+        full_name="Foreign Master",
+        specialization="Stylist",
+        is_active=True,
+    )
+    client.force_login(business_membership.user)
+
+    response = client.get(
+        f"/api/v1/businesses/{business.id}/availability/",
+        {
+            "date": (timezone.localdate() + timedelta(days=1)).isoformat(),
+            "service_id": service.id,
+            "master_id": foreign_master.id,
+        },
+    )
+
+    assert response.status_code == 400
+    assert "Master does not belong to the selected business." in str(response.json())
+
+
+@pytest.mark.django_db
+def test_availability_api_validates_required_query_params(
+    client,
+    business,
+    business_membership,
+):
+    client.force_login(business_membership.user)
+
+    response = client.get(
+        f"/api/v1/businesses/{business.id}/availability/",
+        {"date": "not-a-date"},
+    )
+
+    assert response.status_code == 400
+    assert "date" in response.json()
+    assert "service_id" in response.json()
+
+
+@pytest.mark.django_db
+def test_availability_api_rejects_foreign_business_scope(
+    client,
+    business_membership,
+    another_business,
+    service,
+):
+    client.force_login(business_membership.user)
+
+    response = client.get(
+        f"/api/v1/businesses/{another_business.id}/availability/",
+        {
+            "date": (timezone.localdate() + timedelta(days=1)).isoformat(),
+            "service_id": service.id,
+        },
+    )
+
+    assert response.status_code == 403
+
+
+@pytest.mark.django_db
+def test_outbound_message_list_api_returns_paginated_results(
+    client,
+    business_membership,
+    client_profile,
+):
+    outbound_message = OutboundMessage.objects.create(
+        business=business_membership.business,
+        client=client_profile,
+        channel="whatsapp",
+        recipient="+77071234567",
+        message_type="reminder",
+        text="paging works",
+        status=OutboundMessage.Status.FAILED,
+    )
+    client.force_login(business_membership.user)
+
+    response = client.get(
+        f"/api/v1/businesses/{business_membership.business_id}/outbound-messages/"
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 1
+    assert payload["next"] is None
+    assert payload["previous"] is None
+    assert payload["results"][0]["id"] == outbound_message.id
+    assert payload["results"][0]["status"] == OutboundMessage.Status.FAILED
+
+
+@pytest.mark.django_db
+def test_outbound_retry_api_retries_failed_message(
+    client,
+    business_membership,
+    client_profile,
+    monkeypatch,
+):
+    outbound_message = OutboundMessage.objects.create(
+        business=business_membership.business,
+        client=client_profile,
+        channel="whatsapp",
+        recipient="+77071234567",
+        message_type="follow_up",
+        text="retry me",
+        status=OutboundMessage.Status.FAILED,
+    )
+    client.force_login(business_membership.user)
+    monkeypatch.setattr(
+        "apps.bookings.tasks.dispatch_outbound_delivery",
+        lambda outbound_message_id: {
+            "outbound_message_id": outbound_message_id,
+            "status": OutboundMessage.Status.QUEUED,
+            "delivery_task_id": "retry-task-1",
+        },
+    )
+
+    response = client.post(
+        f"/api/v1/businesses/{business_membership.business_id}/outbound-messages/{outbound_message.id}/retry/"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == outbound_message.id
+    assert response.json()["status"] == OutboundMessage.Status.FAILED
+    assert response.json()["delivery_status"] == OutboundMessage.Status.QUEUED
+    assert response.json()["delivery_task_id"] == "retry-task-1"
+    assert AuditLog.objects.filter(
+        outbound_message=outbound_message,
+        event_type="outbound_retry_requested",
+    ).exists()
+
+
+@pytest.mark.django_db
+def test_outbound_retry_api_rejects_non_failed_message(
+    client,
+    business_membership,
+    client_profile,
+):
+    outbound_message = OutboundMessage.objects.create(
+        business=business_membership.business,
+        client=client_profile,
+        channel="whatsapp",
+        recipient="+77071234567",
+        message_type="reminder",
+        text="delivered already",
+        status=OutboundMessage.Status.DELIVERED,
+    )
+    client.force_login(business_membership.user)
+
+    response = client.post(
+        f"/api/v1/businesses/{business_membership.business_id}/outbound-messages/{outbound_message.id}/retry/"
+    )
+
+    assert response.status_code == 400
+    assert "Only failed outbound messages can be retried." in str(response.json())
+
+
+@pytest.mark.django_db
+def test_outbound_retry_api_returns_404_for_foreign_message_pk(
+    client,
+    business,
+    business_membership,
+    another_business,
+):
+    foreign_client = Client.objects.create(
+        business=another_business,
+        name="Foreign Client",
+        phone="+77070008888",
+    )
+    foreign_message = OutboundMessage.objects.create(
+        business=another_business,
+        client=foreign_client,
+        channel="whatsapp",
+        recipient="+77070008888",
+        message_type="follow_up",
+        text="foreign retry",
+        status=OutboundMessage.Status.FAILED,
+    )
+    client.force_login(business_membership.user)
+
+    response = client.post(
+        f"/api/v1/businesses/{business.id}/outbound-messages/{foreign_message.id}/retry/"
+    )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.django_db
+def test_outbound_resend_api_resets_terminal_message_and_queues_delivery(
+    client,
+    business_membership,
+    client_profile,
+    monkeypatch,
+):
+    outbound_message = OutboundMessage.objects.create(
+        business=business_membership.business,
+        client=client_profile,
+        channel="whatsapp",
+        recipient="+77071234567",
+        message_type="follow_up",
+        text="resend me",
+        status=OutboundMessage.Status.DEAD_LETTER,
+        attempts=3,
+        error_code="timeout",
+        last_error="provider timeout",
+        provider_message_id="provider-old",
+        provider_response={"old": True},
+        submitted_at=timezone.now() - timedelta(hours=1),
+        dead_lettered_at=timezone.now() - timedelta(minutes=10),
+    )
+    client.force_login(business_membership.user)
+    monkeypatch.setattr(
+        "apps.bookings.tasks.dispatch_outbound_delivery",
+        lambda outbound_message_id: {
+            "outbound_message_id": outbound_message_id,
+            "status": OutboundMessage.Status.QUEUED,
+            "delivery_task_id": "resend-task-1",
+        },
+    )
+
+    response = client.post(
+        f"/api/v1/businesses/{business_membership.business_id}/outbound-messages/{outbound_message.id}/resend/"
+    )
+    outbound_message.refresh_from_db()
+
+    assert response.status_code == 200
+    assert response.json()["status"] == OutboundMessage.Status.QUEUED
+    assert response.json()["delivery_status"] == OutboundMessage.Status.QUEUED
+    assert response.json()["delivery_task_id"] == "resend-task-1"
+    assert outbound_message.attempts == 0
+    assert outbound_message.error_code == ""
+    assert outbound_message.last_error == ""
+    assert outbound_message.provider_message_id == ""
+    assert outbound_message.provider_response == {}
+    assert outbound_message.submitted_at is None
+    assert outbound_message.dead_lettered_at is None
+    assert AuditLog.objects.filter(
+        outbound_message=outbound_message,
+        event_type="outbound_resend_requested",
+    ).exists()
+
+
+@pytest.mark.django_db
+def test_outbound_resend_api_rejects_delivered_message(
+    client,
+    business_membership,
+    client_profile,
+):
+    outbound_message = OutboundMessage.objects.create(
+        business=business_membership.business,
+        client=client_profile,
+        channel="whatsapp",
+        recipient="+77071234567",
+        message_type="reminder",
+        text="already delivered",
+        status=OutboundMessage.Status.DELIVERED,
+    )
+    client.force_login(business_membership.user)
+
+    response = client.post(
+        f"/api/v1/businesses/{business_membership.business_id}/outbound-messages/{outbound_message.id}/resend/"
+    )
+
+    assert response.status_code == 400
+    assert (
+        "Only failed, dead-letter, or cancelled messages can be resent."
+        in str(response.json())
+    )
+
+
+@pytest.mark.django_db
+def test_api_schema_endpoint_returns_openapi_document(client):
+    response = client.get("/api/v1/schema/?format=json")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["openapi"].startswith("3.")
+    assert payload["info"]["title"] == "AI-Admin Pro API"
+
+
+@pytest.mark.django_db
+def test_api_swagger_ui_endpoint_is_available(client):
+    response = client.get("/api/v1/schema/swagger-ui/")
+
+    assert response.status_code == 200
+    assert "swagger-ui" in response.content.decode().lower()
+
+
+@override_settings(CORS_ALLOWED_ORIGINS=["http://localhost:3000"])
+@pytest.mark.django_db
+def test_health_endpoint_allows_configured_cors_origin(client):
+    response = client.get(
+        "/api/v1/health/",
+        HTTP_ORIGIN="http://localhost:3000",
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == (
+        "http://localhost:3000"
+    )
