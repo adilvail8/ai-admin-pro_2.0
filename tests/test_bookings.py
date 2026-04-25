@@ -1188,11 +1188,8 @@ def test_healthcheck_returns_ok(client):
 @pytest.mark.django_db
 @override_settings(CELERY_TASK_ALWAYS_EAGER=False)
 def test_healthcheck_fails_when_broker_is_unavailable(client, monkeypatch):
-    from apps.bookings.views import healthcheck
-
-    monkeypatch.setitem(
-        healthcheck.__globals__,
-        "check_broker_connection",
+    monkeypatch.setattr(
+        "apps.bookings.health_checks.check_broker_connection",
         lambda: False,
     )
 
