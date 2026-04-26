@@ -32,6 +32,41 @@ def verify_webhook_token(token: str):
         raise ValidationError("Invalid webhook token.")
 
 
+def normalize_telegram_payload(payload: dict, business_id: int) -> dict:
+    message = payload.get("message") or payload.get("edited_message")
+    if not isinstance(message, dict):
+        raise ValidationError("Unsupported Telegram payload.")
+
+    chat_data = message.get("chat", {})
+    from_data = message.get("from", {})
+    chat_id = str(chat_data.get("id", "")).strip()
+    if not chat_id:
+        raise ValidationError("Telegram chat id is missing.")
+
+    text = (message.get("text") or message.get("caption") or "").strip()
+    unsupported_media = not text and any(
+        key in message
+        for key in ("photo", "video", "sticker", "document", "audio", "voice")
+    )
+    provider_event_id = str(payload.get("update_id", "")).strip() or str(
+        message.get("message_id", "")
+    ).strip()
+
+    return {
+        "business_id": business_id,
+        "external_id": f"tg:{chat_id}",
+        "phone": "",
+        "name": (
+            from_data.get("first_name")
+            or chat_data.get("first_name")
+            or chat_data.get("title", "")
+        ),
+        "text": text,
+        "unsupported_media": unsupported_media,
+        "provider_event_id": provider_event_id,
+    }
+
+
 def verify_telegram_secret(secret: str):
     expected_secret = settings.TELEGRAM_WEBHOOK_SECRET
     if not expected_secret:

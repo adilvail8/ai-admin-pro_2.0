@@ -19,6 +19,7 @@ from .webhooks import (
     handle_text_message,
     mark_inbound_event_failed,
     mark_inbound_event_processed,
+    normalize_telegram_payload,
     register_inbound_event,
     store_message,
     verify_green_api_request,
@@ -189,14 +190,17 @@ def messenger_webhook(request):
 
 @csrf_exempt
 @require_POST
-def telegram_webhook(request, secret: str):
+def telegram_webhook(request, business_id: int, secret: str):
     try:
         verify_telegram_secret(secret)
     except ValidationError as error:
         return JsonResponse({"detail": str(error)}, status=403)
 
     try:
-        payload = parse_request_payload(request)
+        payload = normalize_telegram_payload(
+            parse_request_payload(request),
+            business_id,
+        )
         return process_webhook_request(
             payload=payload,
             request=request,

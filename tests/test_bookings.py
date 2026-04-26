@@ -5,6 +5,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
+from django.conf import settings
 from django.contrib import messages
 from django.contrib.admin.sites import AdminSite
 from django.contrib.auth.models import AnonymousUser
@@ -12,7 +13,7 @@ from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError, transaction
-from django.http import Http404
+from django.http import Http404, JsonResponse
 from django.test import override_settings
 from django.utils import timezone
 from rest_framework.permissions import AllowAny
@@ -73,6 +74,7 @@ from apps.bookings.webhooks import (
     get_or_create_client,
     handle_audio_message,
     handle_text_message,
+    normalize_telegram_payload,
     store_message,
 )
 
@@ -2494,30 +2496,36 @@ def test_webhook_accepts_voice_message(client, business, monkeypatch):
 @pytest.mark.django_db
 @override_settings(TELEGRAM_WEBHOOK_SECRET="tg-secret-123")
 def test_telegram_webhook_requires_secret(client, business, monkeypatch):
-    def fake_handle_text_message(**kwargs):
-        return {"reply": "Здравствуйте!", "escalated": False}
+    def fake_process_webhook_request(*, payload, request, channel):
+        assert payload["business_id"] == business.id
+        assert payload["external_id"] == "tg:700001"
+        assert payload["text"] == "Сәлем"
+        assert channel == ConversationMessage.Channel.TELEGRAM
+        return JsonResponse({"reply": "ok"}, status=200)
 
     monkeypatch.setattr(
-        "apps.bookings.views.handle_text_message",
-        fake_handle_text_message,
+        "apps.bookings.views.process_webhook_request",
+        fake_process_webhook_request,
     )
 
     response = client.post(
-        "/api/v1/webhooks/telegram/tg-secret-123/",
+        f"/api/v1/webhooks/telegram/{business.id}/tg-secret-123/",
         data=json.dumps(
             {
-                "business_id": business.id,
-                "external_id": "tg-1",
-                "phone": "+77070000003",
-                "name": "Telegram User",
-                "text": "Сәлем",
-                "provider_event_id": "evt-tg",
+                "update_id": 12345,
+                "message": {
+                    "message_id": 77,
+                    "chat": {"id": 700001},
+                    "from": {"id": 700001, "first_name": "Telegram User"},
+                    "text": "Сәлем",
+                },
             }
         ),
         content_type="application/json",
     )
 
     assert response.status_code == 200
+    assert response.json()["reply"] == "ok"
 
 
 @pytest.mark.django_db
@@ -3589,6 +3597,199 @@ def test_availability_api_rejects_foreign_business_scope(
 
 
 @pytest.mark.django_db
+def test_normalize_telegram_payload_extracts_text_message(business):
+    payload = {
+        "update_id": 123456,
+        "message": {
+            "message_id": 77,
+            "chat": {"id": 998877},
+            "from": {"id": 998877, "first_name": "Adil"},
+            "text": "Здравствуйте",
+        },
+    }
+
+    normalized = normalize_telegram_payload(payload, business.id)
+
+    assert normalized == {
+        "business_id": business.id,
+        "external_id": "tg:998877",
+        "phone": "",
+        "name": "Adil",
+        "text": "Здравствуйте",
+        "unsupported_media": False,
+        "provider_event_id": "123456",
+    }
+
+
+@pytest.mark.django_db
+def test_normalize_telegram_payload_uses_caption_when_text_missing(business):
+    payload = {
+        "update_id": 123457,
+        "message": {
+            "message_id": 78,
+            "chat": {"id": 112233},
+            "from": {"id": 112233, "first_name": "Aruzhan"},
+            "caption": "Подпись к фото",
+            "photo": [{"file_id": "abc"}],
+        },
+    }
+
+    normalized = normalize_telegram_payload(payload, business.id)
+
+    assert normalized["text"] == "Подпись к фото"
+    assert normalized["unsupported_media"] is False
+    assert normalized["external_id"] == "tg:112233"
+    assert normalized["provider_event_id"] == "123457"
+
+
+@pytest.mark.django_db
+def test_normalize_telegram_payload_marks_sticker_without_text_as_unsupported(
+    business,
+):
+    payload = {
+        "update_id": 123458,
+        "message": {
+            "message_id": 79,
+            "chat": {"id": 445566},
+            "from": {"id": 445566, "first_name": "Dana"},
+            "sticker": {"file_id": "sticker-1"},
+        },
+    }
+
+    normalized = normalize_telegram_payload(payload, business.id)
+
+    assert normalized["text"] == ""
+    assert normalized["unsupported_media"] is True
+    assert normalized["external_id"] == "tg:445566"
+
+
+@pytest.mark.django_db
+@override_settings(TELEGRAM_WEBHOOK_SECRET="tg-secret-123")
+def test_telegram_webhook_normalizes_payload_before_processing(
+    client,
+    business,
+    monkeypatch,
+):
+    captured = {}
+
+    def fake_process_webhook_request(*, payload, request, channel):
+        captured["payload"] = payload
+        captured["channel"] = channel
+        return JsonResponse({"reply": "ok"}, status=200)
+
+    monkeypatch.setattr(
+        "apps.bookings.views.process_webhook_request",
+        fake_process_webhook_request,
+    )
+
+    response = client.post(
+        f"/api/v1/webhooks/telegram/{business.id}/tg-secret-123/",
+        data=json.dumps(
+            {
+                "update_id": 555001,
+                "message": {
+                    "message_id": 99,
+                    "chat": {"id": 700100},
+                    "from": {"id": 700100, "first_name": "Adil"},
+                    "text": "Privet",
+                },
+            }
+        ),
+        content_type="application/json",
+    )
+
+    assert response.status_code == 200
+    assert captured["channel"] == ConversationMessage.Channel.TELEGRAM
+    assert captured["payload"] == {
+        "business_id": business.id,
+        "external_id": "tg:700100",
+        "phone": "",
+        "name": "Adil",
+        "text": "Privet",
+        "unsupported_media": False,
+        "provider_event_id": "555001",
+    }
+
+
+@pytest.mark.django_db
+def test_telegram_webhook_rejects_wrong_secret(client, business):
+    response = client.post(
+        f"/api/v1/webhooks/telegram/{business.id}/wrong-secret/",
+        data=json.dumps(
+            {
+                "update_id": 555002,
+                "message": {
+                    "message_id": 100,
+                    "chat": {"id": 700101},
+                    "from": {"id": 700101, "first_name": "Aruzhan"},
+                    "text": "Privet",
+                },
+            }
+        ),
+        content_type="application/json",
+    )
+
+    assert response.status_code == 403
+
+
+@pytest.mark.django_db
+@override_settings(TELEGRAM_WEBHOOK_SECRET="tg-secret-123")
+def test_telegram_webhook_returns_duplicate_for_same_update_id(
+    client,
+    business,
+    client_profile,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "apps.bookings.views.get_or_create_client",
+        lambda **kwargs: client_profile,
+    )
+    monkeypatch.setattr(
+        "apps.bookings.views.store_message",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "apps.bookings.views.mark_inbound_event_processed",
+        lambda inbound_event: None,
+    )
+    monkeypatch.setattr(
+        "apps.bookings.views.mark_inbound_event_failed",
+        lambda inbound_event, error_message: None,
+    )
+    monkeypatch.setattr(
+        "apps.bookings.views.handle_text_message",
+        lambda **kwargs: {"reply": "ok", "escalated": False},
+    )
+
+    url = f"/api/v1/webhooks/telegram/{business.id}/tg-secret-123/"
+    payload = {
+        "update_id": 555003,
+        "message": {
+            "message_id": 101,
+            "chat": {"id": 700102},
+            "from": {"id": 700102, "first_name": "Dana"},
+            "text": "Privet",
+        },
+    }
+
+    first_response = client.post(
+        url,
+        data=json.dumps(payload),
+        content_type="application/json",
+    )
+    second_response = client.post(
+        url,
+        data=json.dumps(payload),
+        content_type="application/json",
+    )
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    assert second_response.json()["status"] == "duplicate"
+    assert second_response.json()["provider_event_id"] == "555003"
+
+
+@pytest.mark.django_db
 def test_outbound_message_list_api_returns_paginated_results(
     client,
     business_membership,
@@ -3827,3 +4028,5 @@ def test_health_endpoint_allows_configured_cors_origin(client):
     assert response.headers["access-control-allow-origin"] == (
         "http://localhost:3000"
     )
+
+
