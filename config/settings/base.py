@@ -40,6 +40,9 @@ CORS_ALLOW_CREDENTIALS = env.bool("CORS_ALLOW_CREDENTIALS", default=True)
 CORS_URLS_REGEX = r"^/api/.*$"
 
 INSTALLED_APPS = [
+    "unfold",
+    "unfold.contrib.filters",
+    "unfold.contrib.forms",
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -120,6 +123,117 @@ MEDIA_ROOT = BASE_DIR / "media"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 ADMIN_URL_PATH = env("ADMIN_URL_PATH", default="secure-admin/")
+
+UNFOLD = {
+    "SITE_TITLE": "AI Admin Pro",
+    "SITE_HEADER": "AI Admin Pro",
+    "SITE_SYMBOL": "monitoring",
+    "SHOW_HISTORY": True,
+    "SHOW_VIEW_ON_SITE": False,
+    "COLORS": {
+        "primary": {
+            "50": "250 245 255",
+            "100": "243 232 255",
+            "200": "233 213 255",
+            "300": "216 180 254",
+            "400": "192 132 252",
+            "500": "168 85 247",
+            "600": "147 51 234",
+            "700": "126 34 206",
+            "800": "107 33 168",
+            "900": "88 28 135",
+            "950": "59 7 100",
+        },
+    },
+    "SIDEBAR": {
+        "show_search": True,
+        "show_all_applications": False,
+        "navigation": [
+            {
+                "title": "Записи",
+                "icon": "calendar_month",
+                "items": [
+                    {
+                        "title": "Бронирования",
+                        "icon": "event",
+                        "link": f"/{ADMIN_URL_PATH}bookings/booking/",
+                        "badge": "apps.bookings.admin.booking_needs_attention_count",
+                    },
+                    {
+                        "title": "Клиенты",
+                        "icon": "people",
+                        "link": f"/{ADMIN_URL_PATH}bookings/client/",
+                    },
+                ],
+            },
+            {
+                "title": "Коммуникации",
+                "icon": "chat",
+                "items": [
+                    {
+                        "title": "Исходящие сообщения",
+                        "icon": "send",
+                        "link": f"/{ADMIN_URL_PATH}bookings/outboundmessage/",
+                        "badge": "apps.bookings.admin.failed_messages_count",
+                    },
+                    {
+                        "title": "Входящие события",
+                        "icon": "inbox",
+                        "link": f"/{ADMIN_URL_PATH}bookings/inboundevent/",
+                    },
+                ],
+            },
+            {
+                "title": "Справочники",
+                "icon": "settings",
+                "items": [
+                    {
+                        "title": "Бизнесы",
+                        "icon": "store",
+                        "link": f"/{ADMIN_URL_PATH}bookings/business/",
+                    },
+                    {
+                        "title": "Мастера",
+                        "icon": "person",
+                        "link": f"/{ADMIN_URL_PATH}bookings/master/",
+                    },
+                    {
+                        "title": "Услуги",
+                        "icon": "spa",
+                        "link": f"/{ADMIN_URL_PATH}bookings/service/",
+                    },
+                    {
+                        "title": "Категории",
+                        "icon": "category",
+                        "link": f"/{ADMIN_URL_PATH}bookings/category/",
+                    },
+                ],
+            },
+            {
+                "title": "Система",
+                "icon": "admin_panel_settings",
+                "items": [
+                    {
+                        "title": "Аудит",
+                        "icon": "history",
+                        "link": f"/{ADMIN_URL_PATH}bookings/auditlog/",
+                    },
+                    {
+                        "title": "AI Логи",
+                        "icon": "psychology",
+                        "link": f"/{ADMIN_URL_PATH}bookings/aiinteractionlog/",
+                    },
+                    {
+                        "title": "Пользователи",
+                        "icon": "manage_accounts",
+                        "link": f"/{ADMIN_URL_PATH}auth/user/",
+                    },
+                ],
+            },
+        ],
+    },
+    "DASHBOARD_CALLBACK": "apps.bookings.admin.dashboard_callback",
+}
 
 CELERY_BROKER_URL = env(
     "CELERY_BROKER_URL",

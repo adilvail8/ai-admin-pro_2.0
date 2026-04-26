@@ -21,6 +21,7 @@ django-environ==0.13.0
 django-health-check==4.4.0
 django-phonenumber-field==8.4.0
 django-timezone-field==7.2.1
+django-unfold==0.81.0
 djangorestframework==3.17.1
 djangorestframework_simplejwt==5.5.1
 dnspython==2.8.0

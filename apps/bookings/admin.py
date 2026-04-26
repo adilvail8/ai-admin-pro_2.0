@@ -1,8 +1,12 @@
 from django.contrib import admin
 from django.contrib import messages
+from django.utils import timezone
+from unfold.admin import ModelAdmin
+from unfold.decorators import display
 
 from apps.accounts.models import BusinessMembership
 
+from .audit import create_audit_log
 from .models import (
     AIInteractionLog,
     AuditLog,
@@ -16,7 +20,6 @@ from .models import (
     OutboundMessage,
     Service,
 )
-from .audit import create_audit_log
 from .services import update_booking_status
 from .tasks import request_outbound_resend, request_outbound_retry
 
@@ -26,21 +29,91 @@ ADMIN_ROLES = {
     BusinessMembership.Role.ADMIN,
 }
 
+BOOKING_STATUS_LABELS = {
+    Booking.Status.CONFIRMED: "success",
+    Booking.Status.PENDING: "warning",
+    Booking.Status.CANCELLED: "danger",
+    Booking.Status.NO_SHOW: "danger",
+    Booking.Status.NEEDS_ATTENTION: "warning",
+}
+
+OUTBOUND_STATUS_LABELS = {
+    OutboundMessage.Status.QUEUED: "info",
+    OutboundMessage.Status.SUBMITTED: "info",
+    OutboundMessage.Status.DELIVERED: "success",
+    OutboundMessage.Status.FAILED: "danger",
+    OutboundMessage.Status.CANCELLED: "warning",
+    OutboundMessage.Status.DEAD_LETTER: "danger",
+}
+
+
+def _get_request_business_ids(request):
+    if request.user.is_superuser:
+        return None
+    return list(
+        BusinessMembership.objects.filter(
+            user=request.user,
+            is_active=True,
+            role__in=ADMIN_ROLES,
+        ).values_list("business_id", flat=True)
+    )
+
+
+def booking_needs_attention_count(request):
+    queryset = Booking.objects.filter(status=Booking.Status.NEEDS_ATTENTION)
+    business_ids = _get_request_business_ids(request)
+    if business_ids is not None:
+        queryset = queryset.filter(business_id__in=business_ids)
+    count = queryset.count()
+    return str(count) if count else None
+
+
+def failed_messages_count(request):
+    queryset = OutboundMessage.objects.filter(
+        status__in=[
+            OutboundMessage.Status.FAILED,
+            OutboundMessage.Status.DEAD_LETTER,
+        ]
+    )
+    business_ids = _get_request_business_ids(request)
+    if business_ids is not None:
+        queryset = queryset.filter(business_id__in=business_ids)
+    count = queryset.count()
+    return str(count) if count else None
+
+
+def dashboard_callback(request, context):
+    business_ids = _get_request_business_ids(request)
+    today = timezone.localdate()
+
+    bookings = Booking.objects.filter(start_time__date=today)
+    failed_messages = OutboundMessage.objects.filter(
+        status__in=[
+            OutboundMessage.Status.FAILED,
+            OutboundMessage.Status.DEAD_LETTER,
+        ]
+    )
+
+    if business_ids is not None:
+        bookings = bookings.filter(business_id__in=business_ids)
+        failed_messages = failed_messages.filter(business_id__in=business_ids)
+
+    context["today_bookings"] = bookings.filter(
+        status=Booking.Status.CONFIRMED
+    ).count()
+    context["needs_attention_bookings"] = bookings.filter(
+        status=Booking.Status.NEEDS_ATTENTION
+    ).count()
+    context["failed_messages"] = failed_messages.count()
+    return context
+
 
 class TenantScopedAdminMixin:
     business_filter_field = "business"
     business_related_fields = ()
 
     def get_admin_business_ids(self, request):
-        if request.user.is_superuser:
-            return None
-        return list(
-            BusinessMembership.objects.filter(
-                user=request.user,
-                is_active=True,
-                role__in=ADMIN_ROLES,
-            ).values_list("business_id", flat=True)
-        )
+        return _get_request_business_ids(request)
 
     def get_business_queryset(self, request):
         business_ids = self.get_admin_business_ids(request)
@@ -96,9 +169,9 @@ class TenantScopedAdminMixin:
 
 
 @admin.register(Business)
-class BusinessAdmin(TenantScopedAdminMixin, admin.ModelAdmin):
+class BusinessAdmin(TenantScopedAdminMixin, ModelAdmin):
     business_filter_field = "pk"
-    list_display = ("name", "timezone_name", "is_active", "created_at")
+    list_display = ("name", "timezone_name", "colored_active", "created_at")
     list_filter = ("is_active",)
     search_fields = ("name", "slug")
 
@@ -112,23 +185,35 @@ class BusinessAdmin(TenantScopedAdminMixin, admin.ModelAdmin):
     def get_object_business_id(self, obj):
         return obj.pk
 
+    @display(description="Активен", label={True: "success", False: "danger"})
+    def colored_active(self, obj):
+        return obj.is_active
+
 
 @admin.register(Category)
-class CategoryAdmin(TenantScopedAdminMixin, admin.ModelAdmin):
-    list_display = ("name", "business", "is_active", "created_at")
+class CategoryAdmin(TenantScopedAdminMixin, ModelAdmin):
+    list_display = ("name", "business", "colored_active", "created_at")
     list_filter = ("business", "is_active")
     search_fields = ("name", "description")
 
+    @display(description="Активна", label={True: "success", False: "danger"})
+    def colored_active(self, obj):
+        return obj.is_active
+
 
 @admin.register(Master)
-class MasterAdmin(TenantScopedAdminMixin, admin.ModelAdmin):
-    list_display = ("full_name", "business", "specialization", "is_active")
+class MasterAdmin(TenantScopedAdminMixin, ModelAdmin):
+    list_display = ("full_name", "business", "specialization", "colored_active")
     list_filter = ("business", "is_active")
     search_fields = ("full_name", "specialization")
 
+    @display(description="Активен", label={True: "success", False: "danger"})
+    def colored_active(self, obj):
+        return obj.is_active
+
 
 @admin.register(Service)
-class ServiceAdmin(TenantScopedAdminMixin, admin.ModelAdmin):
+class ServiceAdmin(TenantScopedAdminMixin, ModelAdmin):
     business_related_fields = ("category",)
     list_display = (
         "name",
@@ -137,14 +222,18 @@ class ServiceAdmin(TenantScopedAdminMixin, admin.ModelAdmin):
         "price",
         "duration",
         "buffer_time",
-        "is_active",
+        "colored_active",
     )
     list_filter = ("business", "category", "is_active")
     search_fields = ("name", "category__name")
 
+    @display(description="Активна", label={True: "success", False: "danger"})
+    def colored_active(self, obj):
+        return obj.is_active
+
 
 @admin.register(Client)
-class ClientAdmin(TenantScopedAdminMixin, admin.ModelAdmin):
+class ClientAdmin(TenantScopedAdminMixin, ModelAdmin):
     list_display = (
         "name",
         "business",
@@ -152,13 +241,18 @@ class ClientAdmin(TenantScopedAdminMixin, admin.ModelAdmin):
         "telegram_id",
         "whatsapp_id",
         "ai_failure_count",
+        "colored_active",
     )
     list_filter = ("business", "is_active")
     search_fields = ("name", "phone", "telegram_id", "whatsapp_id")
 
+    @display(description="Активен", label={True: "success", False: "danger"})
+    def colored_active(self, obj):
+        return obj.is_active
+
 
 @admin.register(Booking)
-class BookingAdmin(TenantScopedAdminMixin, admin.ModelAdmin):
+class BookingAdmin(TenantScopedAdminMixin, ModelAdmin):
     business_related_fields = ("client", "master", "service")
     actions = ("mark_confirmed", "mark_cancelled", "mark_no_show")
     list_display = (
@@ -168,10 +262,14 @@ class BookingAdmin(TenantScopedAdminMixin, admin.ModelAdmin):
         "master",
         "service",
         "start_time",
-        "status",
+        "colored_status",
     )
     list_filter = ("business", "status")
     search_fields = ("master__full_name", "service__name", "client__phone")
+
+    @display(description="Статус", label=BOOKING_STATUS_LABELS)
+    def colored_status(self, obj):
+        return obj.status
 
     def _apply_status_action(self, request, queryset, *, target_status: str, label: str):
         updated = 0
@@ -230,7 +328,7 @@ class BookingAdmin(TenantScopedAdminMixin, admin.ModelAdmin):
 
 
 @admin.register(ConversationMessage)
-class ConversationMessageAdmin(TenantScopedAdminMixin, admin.ModelAdmin):
+class ConversationMessageAdmin(TenantScopedAdminMixin, ModelAdmin):
     business_related_fields = ("client",)
     list_display = ("id", "business", "client", "channel", "role", "created_at")
     list_filter = ("business", "channel", "role")
@@ -238,21 +336,32 @@ class ConversationMessageAdmin(TenantScopedAdminMixin, admin.ModelAdmin):
 
 
 @admin.register(InboundEvent)
-class InboundEventAdmin(TenantScopedAdminMixin, admin.ModelAdmin):
+class InboundEventAdmin(TenantScopedAdminMixin, ModelAdmin):
     list_display = (
         "id",
         "business",
         "channel",
         "provider_event_id",
-        "status",
+        "colored_status",
         "received_at",
     )
     list_filter = ("business", "channel", "status")
     search_fields = ("provider_event_id",)
 
+    @display(
+        description="Статус",
+        label={
+            InboundEvent.Status.RECEIVED: "info",
+            InboundEvent.Status.PROCESSED: "success",
+            InboundEvent.Status.FAILED: "danger",
+        },
+    )
+    def colored_status(self, obj):
+        return obj.status
+
 
 @admin.register(OutboundMessage)
-class OutboundMessageAdmin(TenantScopedAdminMixin, admin.ModelAdmin):
+class OutboundMessageAdmin(TenantScopedAdminMixin, ModelAdmin):
     business_related_fields = ("client", "booking")
     actions = ("retry_selected_messages", "resend_selected_messages")
     list_display = (
@@ -262,7 +371,7 @@ class OutboundMessageAdmin(TenantScopedAdminMixin, admin.ModelAdmin):
         "channel",
         "recipient",
         "message_type",
-        "status",
+        "colored_status",
         "attempts",
         "error_code",
         "provider_message_id",
@@ -272,6 +381,10 @@ class OutboundMessageAdmin(TenantScopedAdminMixin, admin.ModelAdmin):
     )
     list_filter = ("business", "channel", "message_type", "status")
     search_fields = ("client__phone", "text", "provider_message_id")
+
+    @display(description="Статус", label=OUTBOUND_STATUS_LABELS)
+    def colored_status(self, obj):
+        return obj.status
 
     @admin.action(description="Retry selected failed outbound messages")
     def retry_selected_messages(self, request, queryset):
@@ -329,7 +442,7 @@ class OutboundMessageAdmin(TenantScopedAdminMixin, admin.ModelAdmin):
 
 
 @admin.register(AuditLog)
-class AuditLogAdmin(TenantScopedAdminMixin, admin.ModelAdmin):
+class AuditLogAdmin(TenantScopedAdminMixin, ModelAdmin):
     business_related_fields = ("client", "booking", "outbound_message")
     list_display = (
         "id",
@@ -346,13 +459,23 @@ class AuditLogAdmin(TenantScopedAdminMixin, admin.ModelAdmin):
 
 
 @admin.register(AIInteractionLog)
-class AIInteractionLogAdmin(TenantScopedAdminMixin, admin.ModelAdmin):
+class AIInteractionLogAdmin(TenantScopedAdminMixin, ModelAdmin):
     list_display = (
         "id",
         "business",
         "model_name",
-        "status",
+        "colored_status",
         "created_at",
     )
     list_filter = ("business", "status", "model_name")
     search_fields = ("response_text", "error_message")
+
+    @display(
+        description="Статус",
+        label={
+            AIInteractionLog.Status.SUCCESS: "success",
+            AIInteractionLog.Status.FAILED: "danger",
+        },
+    )
+    def colored_status(self, obj):
+        return obj.status
