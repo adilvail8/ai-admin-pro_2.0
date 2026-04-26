@@ -751,6 +751,44 @@ def test_telegram_transport_builds_provider_result(monkeypatch):
     assert result.provider_message_id == "77"
 
 
+def test_telegram_transport_normalizes_prefixed_chat_id(monkeypatch):
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"ok": True, "result": {"message_id": 78}}
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url, json=None, headers=None):
+            assert "sendMessage" in url
+            assert json["chat_id"] == "12345"
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        "apps.bookings.transports.httpx.Client",
+        FakeClient,
+    )
+
+    with override_settings(TELEGRAM_BOT_TOKEN="bot-token"):
+        result = TelegramTransport().send_text(
+            recipient="tg:12345",
+            text="hello",
+        )
+
+    assert result.accepted is True
+    assert result.provider_message_id == "78"
+
+
 def test_whatsapp_transport_normalizes_chat_id(monkeypatch):
     class FakeResponse:
         def raise_for_status(self):
@@ -2342,6 +2380,25 @@ def test_client_identity_resolver_requires_phone_for_whatsapp(business):
 
 
 @pytest.mark.django_db
+def test_client_identity_resolver_creates_telegram_client_without_phone(business):
+    resolver = ClientIdentityResolver()
+
+    client = resolver.resolve_or_create(
+        business=business,
+        channel=ConversationMessage.Channel.TELEGRAM,
+        phone="",
+        external_id="tg:674240223",
+        name="Telegram User",
+    )
+
+    assert client.business_id == business.id
+    assert client.external_id == "tg:674240223"
+    assert client.telegram_id == "tg:674240223"
+    assert client.phone in ("", None)
+    assert client.name == "Telegram User"
+
+
+@pytest.mark.django_db
 def test_get_or_create_client_reuses_existing_phone_record(business):
     original = Client.objects.create(
         business=business,
@@ -2385,12 +2442,21 @@ def test_webhook_rejects_invalid_token(client):
 @pytest.mark.django_db
 @override_settings(WEBHOOK_SHARED_SECRET="secret-token")
 def test_webhook_accepts_text_message(client, business, monkeypatch):
+    dispatched_ids = []
     def fake_handle_text_message(**kwargs):
         return {"reply": "Здравствуйте!", "escalated": False}
 
     monkeypatch.setattr(
         "apps.bookings.views.handle_text_message",
         fake_handle_text_message,
+    )
+    monkeypatch.setattr(
+        "apps.bookings.views.dispatch_outbound_delivery",
+        lambda outbound_message_id: dispatched_ids.append(outbound_message_id)
+        or {
+            "outbound_message_id": outbound_message_id,
+            "status": OutboundMessage.Status.QUEUED,
+        },
     )
 
     response = client.post(
@@ -2414,6 +2480,13 @@ def test_webhook_accepts_text_message(client, business, monkeypatch):
     assert response.json()["reply"] == "Здравствуйте!"
     assert Client.objects.filter(business=business, phone="+77071234567").exists()
     assert InboundEvent.objects.filter(provider_event_id="evt-1").exists()
+    outbound_message = OutboundMessage.objects.get(
+        business=business,
+        channel="whatsapp",
+        message_type="reply",
+    )
+    assert outbound_message.text == response.json()["reply"]
+    assert dispatched_ids == [outbound_message.id]
 
 
 @pytest.mark.django_db

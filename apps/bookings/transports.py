@@ -164,6 +164,13 @@ class WhatsAppTransport(HTTPTransportBase):
 class TelegramTransport(HTTPTransportBase):
     channel = "telegram"
 
+    @staticmethod
+    def normalize_chat_id(recipient: str) -> str:
+        normalized = recipient.strip()
+        if normalized.startswith("tg:"):
+            return normalized.removeprefix("tg:")
+        return normalized
+
     def build_request(self, *, recipient: str, text: str, metadata: dict | None):
         if not settings.TELEGRAM_BOT_TOKEN:
             raise ValueError("TELEGRAM_BOT_TOKEN is not configured.")
@@ -172,7 +179,7 @@ class TelegramTransport(HTTPTransportBase):
         return {
             "url": url,
             "json": {
-                "chat_id": recipient,
+                "chat_id": self.normalize_chat_id(recipient),
                 "text": text,
                 "disable_web_page_preview": True,
             },

@@ -57,7 +57,7 @@ class ClientIdentityResolver:
                 client = business.clients.filter(phone=phone).first()
 
             if client is None:
-                if not phone:
+                if not phone and channel != ConversationMessage.Channel.TELEGRAM:
                     raise ValidationError(
                         "Phone number is required to create a new client."
                     )
@@ -73,6 +73,12 @@ class ClientIdentityResolver:
                 try:
                     return Client.objects.create(**create_kwargs)
                 except IntegrityError:
+                    if channel_field and external_id:
+                        existing = business.clients.filter(
+                            **{channel_field: external_id}
+                        ).first()
+                        if existing is not None:
+                            return existing
                     return business.clients.get(phone=phone)
 
             update_fields = []

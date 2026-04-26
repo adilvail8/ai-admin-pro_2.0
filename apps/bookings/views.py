@@ -11,7 +11,12 @@ from django.views.decorators.http import require_POST
 from .audit import create_audit_log
 from .health_checks import build_health_snapshot, check_broker_connection
 from .models import ConversationMessage, OutboundMessage
-from .tasks import mark_outbound_as_failed, sync_booking_delivery_marker
+from .tasks import (
+    dispatch_outbound_delivery,
+    get_client_recipient,
+    mark_outbound_as_failed,
+    sync_booking_delivery_marker,
+)
 from .webhooks import (
     get_business,
     get_or_create_client,
@@ -141,6 +146,34 @@ def process_webhook_request(*, payload: dict, request, channel: str):
                 client=client,
                 text=payload.get("text", "").strip(),
             )
+
+        if isinstance(result, dict):
+            reply_text = (result.get("reply", "") or "").strip()
+            if reply_text:
+                outbound_message = OutboundMessage.objects.create(
+                    business=business,
+                    client=client,
+                    channel=channel,
+                    recipient=get_client_recipient(client, channel),
+                    message_type="reply",
+                    text=reply_text,
+                )
+                create_audit_log(
+                    business=business,
+                    client=client,
+                    outbound_message=outbound_message,
+                    actor_type="ai",
+                    event_type="outbound_reply_queued",
+                    channel=channel,
+                    payload={"message_type": "reply"},
+                )
+                dispatch_result = dispatch_outbound_delivery(outbound_message.id)
+                result.setdefault("outbound_message_id", outbound_message.id)
+                if isinstance(dispatch_result, dict) and dispatch_result.get("status"):
+                    result.setdefault(
+                        "notification_status",
+                        dispatch_result["status"],
+                    )
         mark_inbound_event_processed(inbound_event)
         return JsonResponse(result, status=200)
     except Exception:
