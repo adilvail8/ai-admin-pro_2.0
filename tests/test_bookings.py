@@ -3162,10 +3162,7 @@ def test_outbound_message_admin_retry_only_dispatches_failed_messages(
         outbound_message=failed_message,
         event_type="outbound_retry_requested",
     ).exists()
-    assert messages_sent[0][0] == (
-        "Queued retry for 1 outbound message(s). "
-        "Skipped 1 non-failed message(s)."
-    )
+    assert messages_sent[0][0] == "Поставлено в очередь: 1. Пропущено: 1."
 
 
 @pytest.mark.django_db

@@ -255,17 +255,95 @@ class ClientAdmin(TenantScopedAdminMixin, ModelAdmin):
 class BookingAdmin(TenantScopedAdminMixin, ModelAdmin):
     business_related_fields = ("client", "master", "service")
     actions = ("mark_confirmed", "mark_cancelled", "mark_no_show")
+    date_hierarchy = "start_time"
     list_display = (
+        "id",
+        "colored_status",
+        "client",
+        "master",
+        "service",
+        "start_time",
+        "end_time",
+        "business",
+    )
+    list_display_links = ("id", "client")
+    list_filter = ("status", "business", "master")
+    search_fields = (
+        "client__name",
+        "client__phone",
+        "master__full_name",
+        "service__name",
+    )
+    readonly_fields = (
         "id",
         "business",
         "client",
         "master",
         "service",
         "start_time",
+        "end_time",
+        "service_duration",
+        "service_buffer_time",
         "colored_status",
+        "notes",
+        "client_data",
+        "follow_up_sent_at",
+        "reminder_sent_at",
+        "created_at",
+        "updated_at",
     )
-    list_filter = ("business", "status")
-    search_fields = ("master__full_name", "service__name", "client__phone")
+    fieldsets = (
+        (
+            "Запись",
+            {
+                "fields": (
+                    "id",
+                    "colored_status",
+                    ("start_time", "end_time"),
+                    ("service_duration", "service_buffer_time"),
+                )
+            },
+        ),
+        (
+            "Участники",
+            {
+                "fields": (
+                    "business",
+                    "client",
+                    "master",
+                    "service",
+                )
+            },
+        ),
+        (
+            "Детали",
+            {
+                "fields": (
+                    "notes",
+                    "client_data",
+                )
+            },
+        ),
+        (
+            "Уведомления",
+            {
+                "fields": (
+                    "reminder_sent_at",
+                    "follow_up_sent_at",
+                )
+            },
+        ),
+        (
+            "Служебное",
+            {
+                "fields": (
+                    "created_at",
+                    "updated_at",
+                ),
+                "classes": ("collapse",),
+            },
+        ),
+    )
 
     @display(description="Статус", label=BOOKING_STATUS_LABELS)
     def colored_status(self, obj):
@@ -299,7 +377,7 @@ class BookingAdmin(TenantScopedAdminMixin, ModelAdmin):
             level=messages.SUCCESS,
         )
 
-    @admin.action(description="Mark selected bookings as confirmed")
+    @admin.action(description="Подтвердить выбранные записи")
     def mark_confirmed(self, request, queryset):
         self._apply_status_action(
             request,
@@ -308,7 +386,7 @@ class BookingAdmin(TenantScopedAdminMixin, ModelAdmin):
             label="confirmed",
         )
 
-    @admin.action(description="Mark selected bookings as cancelled")
+    @admin.action(description="Отменить выбранные записи")
     def mark_cancelled(self, request, queryset):
         self._apply_status_action(
             request,
@@ -317,7 +395,7 @@ class BookingAdmin(TenantScopedAdminMixin, ModelAdmin):
             label="cancelled",
         )
 
-    @admin.action(description="Mark selected bookings as no-show")
+    @admin.action(description="Отметить как неявку")
     def mark_no_show(self, request, queryset):
         self._apply_status_action(
             request,
@@ -366,37 +444,106 @@ class OutboundMessageAdmin(TenantScopedAdminMixin, ModelAdmin):
     actions = ("retry_selected_messages", "resend_selected_messages")
     list_display = (
         "id",
+        "colored_status",
+        "channel",
+        "message_type",
+        "client",
+        "recipient",
+        "attempts",
+        "error_code",
+        "submitted_at",
+        "business",
+    )
+    list_display_links = ("id", "client")
+    list_filter = ("status", "channel", "message_type", "business")
+    search_fields = (
+        "client__phone",
+        "client__name",
+        "provider_message_id",
+        "recipient",
+    )
+    readonly_fields = (
+        "id",
         "business",
         "client",
+        "booking",
         "channel",
         "recipient",
         "message_type",
         "colored_status",
+        "text",
         "attempts",
         "error_code",
+        "last_error",
         "provider_message_id",
+        "provider_response",
         "submitted_at",
         "delivered_at",
         "dead_lettered_at",
+        "created_at",
+        "updated_at",
     )
-    list_filter = ("business", "channel", "message_type", "status")
-    search_fields = ("client__phone", "text", "provider_message_id")
+    fieldsets = (
+        (
+            "Сообщение",
+            {
+                "fields": (
+                    "id",
+                    "colored_status",
+                    ("channel", "message_type"),
+                    ("business", "client"),
+                    "booking",
+                    "recipient",
+                    "text",
+                )
+            },
+        ),
+        (
+            "Доставка",
+            {
+                "fields": (
+                    "attempts",
+                    ("submitted_at", "delivered_at"),
+                    "dead_lettered_at",
+                    "provider_message_id",
+                )
+            },
+        ),
+        (
+            "Ошибки",
+            {
+                "fields": (
+                    "error_code",
+                    "last_error",
+                    "provider_response",
+                ),
+                "classes": ("collapse",),
+            },
+        ),
+        (
+            "Служебное",
+            {
+                "fields": ("created_at", "updated_at"),
+                "classes": ("collapse",),
+            },
+        ),
+    )
 
     @display(description="Статус", label=OUTBOUND_STATUS_LABELS)
     def colored_status(self, obj):
         return obj.status
 
-    @admin.action(description="Retry selected failed outbound messages")
+    @admin.action(description="Повторить доставку (только FAILED)")
     def retry_selected_messages(self, request, queryset):
         eligible_messages = queryset.filter(status=OutboundMessage.Status.FAILED)
         dispatched = 0
-        for outbound_message in eligible_messages.select_related(
+        for msg in eligible_messages.select_related(
             "business",
             "client",
             "booking",
         ):
             request_outbound_retry(
-                outbound_message=outbound_message,
+                outbound_message=msg,
                 actor_type="human",
                 actor_id=request.user.id,
                 actor_name=request.user.get_username(),
@@ -405,14 +552,11 @@ class OutboundMessageAdmin(TenantScopedAdminMixin, ModelAdmin):
         skipped = queryset.count() - dispatched
         self.message_user(
             request,
-            (
-                f"Queued retry for {dispatched} outbound message(s). "
-                f"Skipped {skipped} non-failed message(s)."
-            ),
+            f"Поставлено в очередь: {dispatched}. Пропущено: {skipped}.",
             level=messages.SUCCESS if dispatched else messages.WARNING,
         )
 
-    @admin.action(description="Resend selected outbound messages")
+    @admin.action(description="Переотправить (FAILED / DEAD_LETTER / CANCELLED)")
     def resend_selected_messages(self, request, queryset):
         eligible_statuses = {
             OutboundMessage.Status.FAILED,
@@ -420,11 +564,11 @@ class OutboundMessageAdmin(TenantScopedAdminMixin, ModelAdmin):
             OutboundMessage.Status.CANCELLED,
         }
         dispatched = 0
-        for outbound_message in queryset.filter(
+        for msg in queryset.filter(
             status__in=eligible_statuses
         ).select_related("business", "client", "booking"):
             request_outbound_resend(
-                outbound_message=outbound_message,
+                outbound_message=msg,
                 actor_type="human",
                 actor_id=request.user.id,
                 actor_name=request.user.get_username(),
@@ -433,10 +577,7 @@ class OutboundMessageAdmin(TenantScopedAdminMixin, ModelAdmin):
         skipped = queryset.count() - dispatched
         self.message_user(
             request,
-            (
-                f"Queued resend for {dispatched} outbound message(s). "
-                f"Skipped {skipped} message(s) that are already in-flight or delivered."
-            ),
+            f"Переотправлено: {dispatched}. Пропущено: {skipped}.",
             level=messages.SUCCESS if dispatched else messages.WARNING,
         )
 
