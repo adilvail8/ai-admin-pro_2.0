@@ -1,16 +1,15 @@
 import json
 from hashlib import sha256
 
-import redis
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.db import connection
 from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
 from .audit import create_audit_log
+from .health_checks import build_health_snapshot, check_broker_connection
 from .models import ConversationMessage, OutboundMessage
 from .tasks import mark_outbound_as_failed, sync_booking_delivery_marker
 from .webhooks import (
@@ -161,20 +160,6 @@ def is_celery_eager_mode() -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
-
-
-def check_broker_connection() -> bool:
-    if is_celery_eager_mode():
-        return True
-    try:
-        redis.from_url(
-            settings.CELERY_BROKER_URL,
-            socket_connect_timeout=2,
-            socket_timeout=2,
-        ).ping()
-    except Exception:
-        return False
-    return True
 
 
 @csrf_exempt
@@ -366,53 +351,8 @@ def outbound_delivery_webhook(request):
 
 
 def healthcheck(request):
-    db_ok = True
-    try:
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT 1")
-            cursor.fetchone()
-    except Exception:
-        db_ok = False
-
-    broker_ok = check_broker_connection()
-
-    checks = {
-        "database": "ok" if db_ok else "failed",
-        "broker": "ok" if broker_ok else "failed",
-        "celery_eager_mode": (
-            "degraded" if is_celery_eager_mode() else "ok"
-        ),
-        "beat_scheduler": "ok" if settings.CELERY_BEAT_SCHEDULER else "failed",
-        "openai_configured": "ok" if settings.OPENAI_API_KEY else "degraded",
-        "telegram_transport": (
-            "ok" if settings.TELEGRAM_BOT_TOKEN else "degraded"
-        ),
-        "whatsapp_transport": (
-            "ok"
-            if (
-                settings.GREEN_API_URL
-                and settings.GREEN_API_INSTANCE_ID
-                and settings.GREEN_API_API_TOKEN
-            )
-            else "degraded"
-        ),
-        "internal_alert_transport": (
-            "ok" if settings.INTERNAL_ALERT_WEBHOOK_URL else "degraded"
-        ),
-    }
-    celery_queues = {
-        "default_queue": getattr(settings, "CELERY_TASK_DEFAULT_QUEUE", "celery"),
-        "routes": {
-            task_name: route.get("queue", getattr(settings, "CELERY_TASK_DEFAULT_QUEUE", "celery"))
-            for task_name, route in getattr(settings, "CELERY_TASK_ROUTES", {}).items()
-        },
-    }
-    overall_status = "ok" if db_ok and broker_ok else "failed"
+    snapshot = build_health_snapshot()
     return JsonResponse(
-        {
-            "status": overall_status,
-            "checks": checks,
-            "celery": celery_queues,
-        },
-        status=200 if overall_status == "ok" else 503,
+        snapshot,
+        status=200 if snapshot["status"] == "ok" else 503,
     )

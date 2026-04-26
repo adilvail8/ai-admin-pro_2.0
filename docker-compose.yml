@@ -184,6 +184,37 @@ services:
       - backend
       - edge
 
+  flower:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: ["flower"]
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings.local
+      DB_HOST: db
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      CELERY_TASK_ALWAYS_EAGER: "False"
+      CELERY_LOGLEVEL: ${CELERY_LOGLEVEL:-info}
+      FLOWER_PORT: ${FLOWER_PORT:-5555}
+      FLOWER_BASIC_AUTH: ${FLOWER_BASIC_AUTH:-}
+      FLOWER_URL_PREFIX: ${FLOWER_URL_PREFIX:-}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      beat:
+        condition: service_started
+    ports:
+      - "${FLOWER_PORT:-5555}:5555"
+    networks:
+      - backend
+      - edge
+
 volumes:
   postgres_data:
   redis_data:

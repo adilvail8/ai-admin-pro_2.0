@@ -1,5 +1,6 @@
 from django.urls import path
 
+from .health_checks import OperationalHealthCheckView
 from .views import (
     green_api_webhook,
     healthcheck,
@@ -35,4 +36,9 @@ urlpatterns = [
         name="outbound_delivery_webhook",
     ),
     path("health/", healthcheck, name="healthcheck"),
+    path(
+        "health/detailed/",
+        OperationalHealthCheckView.as_view(),
+        name="healthcheck_detailed",
+    ),
 ]

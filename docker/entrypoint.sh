@@ -34,6 +34,19 @@ case "$role" in
     echo "Starting Celery beat..."
     exec celery -A config.celery:app beat --loglevel="${CELERY_LOGLEVEL:-info}"
     ;;
+  flower)
+    echo "Starting Flower..."
+    flower_args="--port=${FLOWER_PORT:-5555}"
+    if [ -n "${FLOWER_URL_PREFIX:-}" ]; then
+      flower_args="$flower_args --url_prefix=${FLOWER_URL_PREFIX}"
+    fi
+    if [ -n "${FLOWER_BASIC_AUTH:-}" ]; then
+      exec celery -A config.celery:app flower \
+        $flower_args \
+        --basic_auth="${FLOWER_BASIC_AUTH}"
+    fi
+    exec celery -A config.celery:app flower $flower_args
+    ;;
   *)
     exec "$role" "$@"
     ;;

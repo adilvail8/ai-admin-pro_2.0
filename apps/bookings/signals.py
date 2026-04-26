@@ -5,6 +5,7 @@ from django.dispatch import receiver
 
 
 REMINDER_TASK_NAME = "bookings-process-pending-reminders"
+OUTBOUND_ALERT_TASK_NAME = "bookings-process-outbound-health-alerts"
 
 
 @receiver(post_migrate)
@@ -33,6 +34,21 @@ def ensure_booking_periodic_tasks(sender, **kwargs):
                 "enabled": True,
                 "description": (
                     "Scans bookings every minute and queues reminders/follow-ups."
+                ),
+            },
+        )
+        alert_schedule, _ = interval_model.objects.get_or_create(
+            every=5,
+            period=interval_model.MINUTES,
+        )
+        periodic_task_model.objects.update_or_create(
+            name=OUTBOUND_ALERT_TASK_NAME,
+            defaults={
+                "interval": alert_schedule,
+                "task": "apps.bookings.tasks.process_outbound_health_alerts",
+                "enabled": True,
+                "description": (
+                    "Scans outbound delivery failures and sends operational alerts."
                 ),
             },
         )

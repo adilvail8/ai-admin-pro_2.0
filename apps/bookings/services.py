@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
@@ -33,13 +34,35 @@ def parse_clock(value: str) -> time:
     return time.fromisoformat(value)
 
 
-def build_day_window(target_date: date):
-    tz = timezone.get_current_timezone()
+def get_business_timezone(business: Business):
+    return ZoneInfo(business.timezone_name or timezone.get_current_timezone_name())
+
+
+def build_day_window(target_date: date, *, business_tz):
     day_start = timezone.make_aware(
         datetime.combine(target_date, time.min),
-        tz,
+        business_tz,
     )
     return day_start, day_start + timedelta(days=1)
+
+
+def validate_service_level_business_rules(*, business, service):
+    ai_rules = business.ai_rules if isinstance(business.ai_rules, dict) else {}
+    blocked_service_ids = {
+        int(item)
+        for item in ai_rules.get("blocked_service_ids", [])
+        if str(item).isdigit()
+    }
+    blocked_category_ids = {
+        int(item)
+        for item in ai_rules.get("blocked_category_ids", [])
+        if str(item).isdigit()
+    }
+
+    if service.id in blocked_service_ids:
+        raise ValidationError("This service is blocked by business rules.")
+    if service.category_id and service.category_id in blocked_category_ids:
+        raise ValidationError("This service category is blocked by business rules.")
 
 
 def validate_business_booking_rules(*, business, master, service):
@@ -79,19 +102,19 @@ def iter_master_slots(
     target_date: date,
     duration: timedelta,
     slot_step: timedelta,
+    business_tz,
 ):
     schedule = master.get_daily_schedule(target_date)
     if not schedule:
         return []
 
-    tz = timezone.get_current_timezone()
     work_start = timezone.make_aware(
         datetime.combine(target_date, parse_clock(schedule["start"])),
-        tz,
+        business_tz,
     )
     work_end = timezone.make_aware(
         datetime.combine(target_date, parse_clock(schedule["end"])),
-        tz,
+        business_tz,
     )
 
     slots = []
@@ -118,23 +141,49 @@ def slot_overlaps(slot: TimeSlot, bookings):
 
 
 def get_available_slots(
-    business_id: int,
+    business: Business,
     *,
     target_date: date,
     service_id: int,
     master_id: int | None = None,
     slot_step: timedelta = DEFAULT_SLOT_STEP,
 ):
-    business = Business.objects.get(pk=business_id, is_active=True)
+    if not business.is_active:
+        raise ValidationError("Business is inactive.")
     service = business.services.get(pk=service_id, is_active=True)
+    validate_service_level_business_rules(business=business, service=service)
+
+    business_tz = get_business_timezone(business)
+    local_now = timezone.now().astimezone(business_tz)
+    is_today_in_business_timezone = target_date == local_now.date()
+
     masters = business.masters.filter(is_active=True)
     if master_id is not None:
-        masters = masters.filter(pk=master_id)
+        try:
+            master = masters.get(pk=master_id)
+        except business.masters.model.DoesNotExist as error:
+            raise ValidationError(
+                "Master does not belong to the selected business."
+            ) from error
+        validate_business_booking_rules(
+            business=business,
+            master=master,
+            service=service,
+        )
+        masters = masters.filter(pk=master.pk)
 
-    day_start, day_end = build_day_window(target_date)
+    day_start, day_end = build_day_window(target_date, business_tz=business_tz)
     available_slots = []
 
     for master in masters:
+        try:
+            validate_business_booking_rules(
+                business=business,
+                master=master,
+                service=service,
+            )
+        except ValidationError:
+            continue
         bookings = list(
             Booking.objects.active()
             .filter(
@@ -150,7 +199,10 @@ def get_available_slots(
             target_date=target_date,
             duration=service.duration + service.buffer_time,
             slot_step=slot_step,
+            business_tz=business_tz,
         ):
+            if is_today_in_business_timezone and slot.start < local_now:
+                continue
             if not slot_overlaps(slot, bookings):
                 available_slots.append(slot)
 
@@ -439,8 +491,9 @@ def execute_ai_function(
     payload: dict,
 ):
     if function_name in {"get_available_slots", "get_free_slots"}:
+        business = Business.objects.get(pk=payload["business_id"], is_active=True)
         slots = get_available_slots(
-            payload["business_id"],
+            business,
             target_date=date.fromisoformat(payload["date"]),
             service_id=payload["service_id"],
             master_id=payload.get("master_id"),
