@@ -1,0 +1,14 @@
+{% extends "admin/change_list.html" %}
+
+{% block object-tools-items %}
+  {% if show_technical %}
+    <li>
+      <a href="?">Скрыть технические</a>
+    </li>
+  {% else %}
+    <li>
+      <a href="?show_technical=1">Показать технические</a>
+    </li>
+  {% endif %}
+  {{ block.super }}
+{% endblock %}

@@ -1535,6 +1535,7 @@ class OutboundMessageAdmin(TenantScopedAdminMixin, ModelAdmin):
 @admin.register(AuditLog)
 class AuditLogAdmin(TenantScopedAdminMixin, ModelAdmin):
     business_related_fields = ("client", "booking", "outbound_message")
+    change_list_template = "admin/bookings/auditlog/change_list.html"
     list_display = (
         "id",
         "business",
@@ -1558,12 +1559,27 @@ class AuditLogAdmin(TenantScopedAdminMixin, ModelAdmin):
             return False
         return super().has_view_permission(request, obj=obj)
 
+    def changelist_view(self, request, extra_context=None):
+        show_technical = request.GET.get("show_technical") == "1"
+        request.show_technical_audit_events = show_technical
+        if "show_technical" in request.GET:
+            request.GET = request.GET.copy()
+            request.GET.pop("show_technical", None)
+            request.META["QUERY_STRING"] = request.GET.urlencode()
+        extra_context = extra_context or {}
+        extra_context["show_technical"] = show_technical
+        return super().changelist_view(request, extra_context=extra_context)
+
     def get_queryset(self, request):
         queryset = super().get_queryset(request)
         has_explicit_event_filter = any(
             key.startswith("event_type") for key in request.GET.keys()
         )
-        if request.GET.get("show_technical") == "1" or has_explicit_event_filter:
+        if (
+            getattr(request, "show_technical_audit_events", False)
+            or request.GET.get("show_technical") == "1"
+            or has_explicit_event_filter
+        ):
             return queryset
         return queryset.exclude(event_type__in=TECHNICAL_AUDIT_EVENT_TYPES)
 
