@@ -1396,49 +1396,6 @@ def build_cancellation_reply(*, language: str) -> str:
 
 def is_affirmative_message(text: str) -> bool:
     normalized = (text or "").strip().lower()
-    return normalized in {
-        "да",
-        "ага",
-        "ок",
-        "okay",
-        "yes",
-        "угу",
-        "подтверждаю",
-        "иә",
-        "ия",
-        "ха",
-        "жарайды",
-    }
-
-
-def is_affirmative_message(text: str) -> bool:
-    normalized = (text or "").strip().lower()
-    return normalized in {
-        "да",
-        "ага",
-        "ок",
-        "okay",
-        "yes",
-        "угу",
-        "подтверждаю",
-        "иә",
-        "ия",
-        "ха",
-        "жарайды",
-        "РґР°",
-        "Р°РіР°",
-        "РѕРє",
-        "СѓРіСѓ",
-        "РїРѕРґС‚РІРµСЂР¶РґР°СЋ",
-        "РёУ™",
-        "РёСЏ",
-        "С…Р°",
-        "Р¶Р°СЂР°Р№РґС‹",
-    }
-
-
-def is_affirmative_message(text: str) -> bool:
-    normalized = (text or "").strip().lower()
     affirmative_variants = {
         "\u0434\u0430",
         "\u0430\u0433\u0430",
