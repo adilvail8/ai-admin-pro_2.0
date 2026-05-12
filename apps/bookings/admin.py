@@ -4,7 +4,7 @@ from django import forms
 from django.contrib import admin
 from django.contrib import messages
 from django.core.exceptions import ValidationError
-from django.db.models import Count, Max
+from django.db.models import Count, Max, OuterRef, Q, Subquery
 from django.http import HttpResponseBadRequest
 from django.shortcuts import redirect
 from django.template.response import TemplateResponse
@@ -75,12 +75,12 @@ TECHNICAL_AUDIT_EVENT_TYPES = {
 }
 
 USER_ROLE = ConversationMessage.Role.USER
-REPLY_ROLES = {
+REPLY_ROLES = [
     ConversationMessage.Role.ASSISTANT,
     ConversationMessage.Role.TOOL,
     ConversationMessage.Role.SYSTEM,
     "human",
-}
+]
 
 
 def _get_request_business_ids(request):
@@ -1068,9 +1068,22 @@ class ConversationMessageAdmin(TenantScopedAdminMixin, ModelAdmin):
         business_ids = self.get_admin_business_ids(request)
         if business_ids is not None:
             queryset = queryset.filter(business_id__in=business_ids)
+        _last_msg_qs = ConversationMessage.objects.filter(
+            client=OuterRef("pk")
+        ).order_by("-created_at", "-id")
         return queryset.annotate(
             last_message_at=Max("conversation_messages__created_at"),
             message_count=Count("conversation_messages"),
+            last_message_channel=Subquery(_last_msg_qs.values("channel")[:1]),
+            last_message_content=Subquery(_last_msg_qs.values("content")[:1]),
+            last_user_message_at=Max(
+                "conversation_messages__created_at",
+                filter=Q(conversation_messages__role=USER_ROLE),
+            ),
+            last_reply_message_at=Max(
+                "conversation_messages__created_at",
+                filter=Q(conversation_messages__role__in=REPLY_ROLES),
+            ),
         ).filter(message_count__gt=0)
 
     def get_selected_inbox_client(self, request, clients_queryset):
@@ -1107,46 +1120,29 @@ class ConversationMessageAdmin(TenantScopedAdminMixin, ModelAdmin):
         stale_threshold = now - timedelta(hours=2)
         active_threshold = now - timedelta(days=7)
         for client in clients_queryset.order_by("-last_message_at", "name")[:60]:
-            last_message = (
-                ConversationMessage.objects.filter(client=client)
-                .order_by("-created_at", "-id")
-                .first()
-            )
-            last_user_message = (
-                ConversationMessage.objects.filter(
-                    client=client,
-                    role=USER_ROLE,
-                )
-                .order_by("-created_at", "-id")
-                .first()
-            )
-            last_reply_message = (
-                ConversationMessage.objects.filter(
-                    client=client,
-                    role__in=REPLY_ROLES,
-                )
-                .order_by("-created_at", "-id")
-                .first()
-            )
-            needs_attention = _dialog_needs_attention(
-                last_user_message,
-                last_reply_message,
-            )
-            is_stale = bool(
-                needs_attention
-                and last_user_message
-                and last_user_message.created_at <= stale_threshold
-            )
+            lum_at = client.last_user_message_at
+            lrm_at = client.last_reply_message_at
+            needs_attention = bool(lum_at and (lrm_at is None or lum_at > lrm_at))
+            is_stale = bool(needs_attention and lum_at and lum_at <= stale_threshold)
             is_active = bool(client.last_message_at and client.last_message_at >= active_threshold)
             if status_filter == "active" and not is_active:
                 continue
             if status_filter == "attention" and not is_stale:
                 continue
+            channel = client.last_message_channel or get_client_channel(client)
+            last_message = (
+                type("_Msg", (), {
+                    "content": client.last_message_content,
+                    "channel": channel,
+                })()
+                if client.last_message_at
+                else None
+            )
             dialogs.append(
                 {
                     "client": client,
                     "last_message": last_message,
-                    "channel": last_message.channel if last_message else get_client_channel(client),
+                    "channel": channel,
                     "message_count": client.message_count,
                     "last_message_at": client.last_message_at,
                     "needs_attention": needs_attention,
