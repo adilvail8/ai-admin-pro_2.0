@@ -507,9 +507,43 @@ def failed_messages_count(request):
     return str(count) if count else ""
 
 
+def _dialog_needs_attention(last_user_message, last_reply_message):
+    return bool(
+        last_user_message
+        and (
+            last_reply_message is None
+            or last_user_message.created_at > last_reply_message.created_at
+        )
+    )
+
+
+def _count_stale_unanswered_dialogs(messages_queryset, stale_threshold):
+    count = 0
+    client_ids = messages_queryset.values_list("client_id", flat=True).distinct()
+    for client_id in client_ids:
+        last_user_message = (
+            messages_queryset.filter(client_id=client_id, role=USER_ROLE)
+            .order_by("-created_at", "-id")
+            .first()
+        )
+        if not last_user_message or last_user_message.created_at > stale_threshold:
+            continue
+        last_reply_message = (
+            messages_queryset.filter(client_id=client_id, role__in=REPLY_ROLES)
+            .order_by("-created_at", "-id")
+            .first()
+        )
+        if _dialog_needs_attention(last_user_message, last_reply_message):
+            count += 1
+    return count
+
+
 def dashboard_callback(request, context):
     business_ids = _get_request_business_ids(request)
+    now = timezone.now()
     today = timezone.localdate()
+    last_24h = now - timedelta(hours=24)
+    stale_threshold = now - timedelta(hours=2)
 
     bookings = Booking.objects.filter(start_time__date=today)
     failed_messages = OutboundMessage.objects.filter(
@@ -541,41 +575,51 @@ def dashboard_callback(request, context):
         )
         today_bookings = owner_bookings.filter(start_time__date=today)
         upcoming_bookings = owner_bookings.filter(
-            start_time__date__gte=today,
-            status__in=[Booking.Status.CONFIRMED, Booking.Status.PENDING],
-        ).select_related("client", "master", "service")[:5]
-        recent_messages = owner_messages.select_related("client").order_by("-created_at")[:6]
+            start_time__gte=now,
+            status=Booking.Status.CONFIRMED,
+        ).select_related("client", "master", "service").order_by("start_time")[:5]
+        new_messages_24h = owner_messages.filter(
+            role=USER_ROLE,
+            created_at__gte=last_24h,
+        ).count()
+        stale_dialogs = _count_stale_unanswered_dialogs(
+            owner_messages,
+            stale_threshold,
+        )
 
         context["owner_dashboard"] = {
             "business": business,
+            "bookings_today": today_bookings.filter(
+                status__in=[Booking.Status.CONFIRMED, Booking.Status.PENDING],
+            ).count(),
+            "new_messages_24h": new_messages_24h,
+            "stale_dialogs": stale_dialogs,
             "cards": [
                 {
                     "label": "\u0417\u0430\u043f\u0438\u0441\u0438 \u0441\u0435\u0433\u043e\u0434\u043d\u044f",
-                    "value": today_bookings.count(),
+                    "value": today_bookings.filter(
+                        status__in=[
+                            Booking.Status.CONFIRMED,
+                            Booking.Status.PENDING,
+                        ],
+                    ).count(),
                     "icon": "event_available",
                     "tone": "green",
                     "href": reverse("admin:bookings_booking_changelist"),
                 },
                 {
-                    "label": "\u041d\u0443\u0436\u043d\u0430 \u0440\u0435\u0430\u043a\u0446\u0438\u044f",
-                    "value": owner_bookings.filter(status=Booking.Status.NEEDS_ATTENTION).count(),
-                    "icon": "priority_high",
-                    "tone": "amber",
-                    "href": reverse("admin:bookings_booking_changelist"),
-                },
-                {
-                    "label": "\u041a\u043b\u0438\u0435\u043d\u0442\u044b",
-                    "value": Client.objects.filter(business=business).count() if business else 0,
-                    "icon": "groups",
-                    "tone": "blue",
-                    "href": reverse("admin:bookings_client_changelist"),
-                },
-                {
-                    "label": "\u041d\u043e\u0432\u044b\u0435 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u044f",
-                    "value": owner_messages.filter(role=ConversationMessage.Role.USER).count(),
+                    "label": "\u041d\u043e\u0432\u044b\u0435 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u044f \u0437\u0430 24\u0447",
+                    "value": new_messages_24h,
                     "icon": "mark_unread_chat_alt",
                     "tone": "red",
                     "href": reverse("admin:bookings_conversationmessage_inbox"),
+                },
+                {
+                    "label": "\u0411\u0435\u0437 \u043e\u0442\u0432\u0435\u0442\u0430 2\u0447+",
+                    "value": stale_dialogs,
+                    "icon": "schedule",
+                    "tone": "amber",
+                    "href": f"{reverse('admin:bookings_conversationmessage_inbox')}?status=attention",
                 },
             ],
             "quick_actions": [
@@ -596,7 +640,6 @@ def dashboard_callback(request, context):
                 },
             ],
             "upcoming_bookings": upcoming_bookings,
-            "recent_messages": recent_messages,
         }
     return context
 
@@ -1054,12 +1097,9 @@ class ConversationMessageAdmin(TenantScopedAdminMixin, ModelAdmin):
                 .order_by("-created_at", "-id")
                 .first()
             )
-            needs_attention = bool(
-                last_user_message
-                and (
-                    last_reply_message is None
-                    or last_user_message.created_at > last_reply_message.created_at
-                )
+            needs_attention = _dialog_needs_attention(
+                last_user_message,
+                last_reply_message,
             )
             is_stale = bool(
                 needs_attention
