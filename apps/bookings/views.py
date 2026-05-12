@@ -1,22 +1,47 @@
 import json
 from hashlib import sha256
 
+import httpx
 from django.conf import settings
 from django.core.exceptions import ValidationError
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
+from .ai_manager import AIManager
 from .audit import create_audit_log
 from .health_checks import build_health_snapshot, check_broker_connection
 from .models import ConversationMessage, OutboundMessage
+from .normalizers import legacy_payload_from_internal_event, normalize_incoming_event
 from .tasks import (
     dispatch_outbound_delivery,
     get_client_recipient,
     mark_outbound_as_failed,
     sync_booking_delivery_marker,
 )
+LOCALIZED_UNSUPPORTED_MEDIA_MESSAGES = {
+    "generic": {
+        "ru": "Я пока не умею полноценно разбирать такие сообщения. Если можете, напишите, пожалуйста, в двух словах текстом — и я сразу помогу.",
+        "kz": "Мұндай хабарламаларды әзірге толық талдай алмаймын. Мүмкін болса, қысқаша мәтінмен жаза салыңыз — бірден көмектесемін.",
+    },
+    "image": {
+        "ru": "Фото получила. Если можете, коротко напишите текстом, что именно хотите уточнить по этому фото — так я быстрее помогу.",
+        "kz": "Фотоны алдым. Мүмкін болса, осы фото бойынша не білгіңіз келетінін қысқаша мәтінмен жаза салыңыз — сонда тезірек көмектесемін.",
+    },
+}
+
+
+def build_unsupported_media_message(*, language: str, media_type: str = "") -> str:
+    normalized_media_type = (media_type or "").lower()
+    if "image" in normalized_media_type or "photo" in normalized_media_type:
+        variants = LOCALIZED_UNSUPPORTED_MEDIA_MESSAGES["image"]
+        return variants.get(language, variants["ru"])
+    variants = LOCALIZED_UNSUPPORTED_MEDIA_MESSAGES["generic"]
+    return variants.get(language, variants["ru"])
+
+
 from .webhooks import (
     get_business,
     get_or_create_client,
@@ -24,9 +49,10 @@ from .webhooks import (
     handle_text_message,
     mark_inbound_event_failed,
     mark_inbound_event_processed,
-    normalize_telegram_payload,
     register_inbound_event,
     store_message,
+    detect_client_language,
+    get_localized_runtime_message,
     verify_green_api_request,
     verify_telegram_secret,
     verify_webhook_token,
@@ -60,35 +86,88 @@ def extract_provider_event_id(payload: dict, channel: str) -> str:
     return f"{channel}:{digest}"
 
 
+def download_whatsapp_audio(payload: dict):
+    download_url = str(payload.get("audio_download_url", "")).strip()
+    if not download_url:
+        return None
+
+    headers_candidates = [
+        {},
+        {"Authorization": f"Bearer {settings.GREEN_API_API_TOKEN}"},
+        {"Authorization": settings.GREEN_API_API_TOKEN},
+    ]
+    for headers in headers_candidates:
+        try:
+            response = httpx.get(download_url, headers=headers, timeout=20.0)
+            response.raise_for_status()
+            content_type = response.headers.get("Content-Type", "")
+            extension = ".ogg"
+            if "mpeg" in content_type:
+                extension = ".mp3"
+            elif "wav" in content_type:
+                extension = ".wav"
+            return SimpleUploadedFile(
+                payload.get("audio_file_name") or f"voice{extension}",
+                response.content,
+                content_type=content_type or payload.get("audio_mime_type") or "audio/ogg",
+            )
+        except Exception:
+            continue
+    return None
+
+
 def normalize_whatsapp_green_api_payload(payload: dict, business_id: int) -> dict:
-    sender_data = payload.get("senderData", {})
-    message_data = payload.get("messageData", {})
-    type_message = message_data.get("typeMessage", "")
-
-    text = (
-        message_data.get("textMessageData", {}).get("textMessage")
-        or message_data.get("extendedTextMessageData", {}).get("text")
-        or payload.get("text", "")
+    event = normalize_incoming_event(
+        ConversationMessage.Channel.WHATSAPP,
+        payload,
+        business_id,
     )
-    unsupported_media = bool(type_message and "text" not in type_message.lower())
+    return legacy_payload_from_internal_event(event)
 
-    chat_id = str(sender_data.get("chatId", "")).strip()
-    phone = chat_id.replace("@c.us", "").replace("@g.us", "")
-    if phone and not phone.startswith("+"):
-        phone = f"+{phone}"
 
-    return {
-        "business_id": business_id,
-        "external_id": chat_id or str(sender_data.get("sender", "")).strip(),
-        "phone": phone,
-        "name": sender_data.get("senderName", ""),
-        "text": text,
-        "unsupported_media": unsupported_media,
-        "provider_event_id": (
-            str(payload.get("idMessage", "")).strip()
-            or str(message_data.get("idMessage", "")).strip()
-        ),
-    }
+def is_green_api_provider_payload(payload: dict) -> bool:
+    return any(
+        key in payload
+        for key in (
+            "typeWebhook",
+            "senderData",
+            "messageData",
+            "idMessage",
+        )
+    )
+
+
+def extract_green_api_business_id(*, payload: dict, request) -> int:
+    business_id = payload.get("business_id") or request.GET.get("business_id")
+    if not business_id:
+        raise ValidationError("Green-API webhook requires business_id.")
+    return int(business_id)
+
+
+def process_internal_event(*, event: dict, request):
+    if event.get("event_type") == "service":
+        return JsonResponse(
+            {"status": "ignored", "event_type": event.get("event_type")},
+            status=200,
+        )
+
+    if event.get("channel") == ConversationMessage.Channel.TELEGRAM and event.get("event_type") == "text":
+        payload = {
+            "business_id": event["business_id"],
+            "external_id": event["client"]["external_id"],
+            "phone": event["client"]["phone"],
+            "name": event["client"]["name"],
+            "text": event["message"]["text"] or event["message"]["caption"],
+            "unsupported_media": False,
+            "provider_event_id": str(event["raw"].get("update_id", "")).strip() or event["message"]["message_id"],
+        }
+    else:
+        payload = legacy_payload_from_internal_event(event)
+    return process_webhook_request(
+        payload=payload,
+        request=request,
+        channel=event["channel"],
+    )
 
 
 def process_webhook_request(*, payload: dict, request, channel: str):
@@ -115,21 +194,57 @@ def process_webhook_request(*, payload: dict, request, channel: str):
             phone=payload.get("phone", ""),
             name=payload.get("name", ""),
         )
-
-        audio_file = request.FILES.get("audio") or request.FILES.get("voice")
+        ai_manager = AIManager(business=business, client=client)
+        audio_file = (
+            request.FILES.get("audio")
+            or request.FILES.get("voice")
+            or download_whatsapp_audio(payload)
+        )
+        preferred_language = detect_client_language(
+            ai_manager=ai_manager,
+            business_id=business_id,
+            client=client,
+            channel=channel,
+            current_text=(payload.get("text", "") or "").strip(),
+        )
+        media_type = str(payload.get("media_type", "") or "").lower()
+        text_value = (payload.get("text", "") or "").strip()
+        is_audio_message = any(
+            marker in media_type for marker in ("audio", "ptt", "voice")
+        )
         has_unsupported_media = payload.get("unsupported_media", False) or (
             bool(request.FILES) and audio_file is None
         )
-        if has_unsupported_media:
+        if is_audio_message and audio_file is None and not text_value:
+            voice_fallback_message = get_localized_runtime_message(
+                "voice_fallback",
+                preferred_language,
+            )
             store_message(
                 business_id=business_id,
                 client=client,
                 channel=channel,
                 role=ConversationMessage.Role.ASSISTANT,
-                content=UNSUPPORTED_MEDIA_MESSAGE,
+                content=voice_fallback_message,
             )
             result = {
-                "reply": UNSUPPORTED_MEDIA_MESSAGE,
+                "reply": voice_fallback_message,
+                "escalated": False,
+            }
+        elif has_unsupported_media:
+            unsupported_media_message = build_unsupported_media_message(
+                language=preferred_language,
+                media_type=str(payload.get("media_type", "")),
+            )
+            store_message(
+                business_id=business_id,
+                client=client,
+                channel=channel,
+                role=ConversationMessage.Role.ASSISTANT,
+                content=unsupported_media_message,
+            )
+            result = {
+                "reply": unsupported_media_message,
                 "escalated": False,
             }
         elif audio_file is not None:
@@ -138,13 +253,15 @@ def process_webhook_request(*, payload: dict, request, channel: str):
                 channel=channel,
                 client=client,
                 audio_file=audio_file,
+                ai_manager=ai_manager,
             )
         else:
             result = handle_text_message(
                 business_id=business_id,
                 channel=channel,
                 client=client,
-                text=payload.get("text", "").strip(),
+                text=text_value,
+                ai_manager=ai_manager,
             )
 
         if isinstance(result, dict):
@@ -230,15 +347,12 @@ def telegram_webhook(request, business_id: int, secret: str):
         return JsonResponse({"detail": str(error)}, status=403)
 
     try:
-        payload = normalize_telegram_payload(
+        event = normalize_incoming_event(
+            ConversationMessage.Channel.TELEGRAM,
             parse_request_payload(request),
             business_id,
         )
-        return process_webhook_request(
-            payload=payload,
-            request=request,
-            channel=ConversationMessage.Channel.TELEGRAM,
-        )
+        return process_internal_event(event=event, request=request)
     except (KeyError, ValueError, ValidationError, json.JSONDecodeError) as error:
         return JsonResponse({"detail": str(error)}, status=400)
 
@@ -249,6 +363,7 @@ def green_api_webhook(request):
     try:
         verify_green_api_request(
             token=request.headers.get("X-GreenAPI-Secret", ""),
+            authorization=request.headers.get("Authorization", ""),
             remote_addr=request.META.get("REMOTE_ADDR", ""),
         )
     except ValidationError as error:
@@ -256,6 +371,13 @@ def green_api_webhook(request):
 
     try:
         payload = parse_request_payload(request)
+        if is_green_api_provider_payload(payload):
+            event = normalize_incoming_event(
+                ConversationMessage.Channel.WHATSAPP,
+                payload,
+                extract_green_api_business_id(payload=payload, request=request),
+            )
+            return process_internal_event(event=event, request=request)
         return process_webhook_request(
             payload=payload,
             request=request,
@@ -271,6 +393,7 @@ def whatsapp_webhook(request, business_id: int):
     try:
         verify_green_api_request(
             token=request.headers.get("X-GreenAPI-Secret", ""),
+            authorization=request.headers.get("Authorization", ""),
             remote_addr=request.META.get("REMOTE_ADDR", ""),
         )
     except ValidationError as error:
@@ -278,15 +401,12 @@ def whatsapp_webhook(request, business_id: int):
 
     try:
         provider_payload = parse_request_payload(request)
-        normalized_payload = normalize_whatsapp_green_api_payload(
+        event = normalize_incoming_event(
+            ConversationMessage.Channel.WHATSAPP,
             provider_payload,
             business_id,
         )
-        return process_webhook_request(
-            payload=normalized_payload,
-            request=request,
-            channel=ConversationMessage.Channel.WHATSAPP,
-        )
+        return process_internal_event(event=event, request=request)
     except (KeyError, ValueError, ValidationError, json.JSONDecodeError) as error:
         return JsonResponse({"detail": str(error)}, status=400)
 

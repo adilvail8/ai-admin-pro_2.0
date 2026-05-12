@@ -10,10 +10,10 @@ class ClientIdentityResolver:
         ConversationMessage.Channel.WHATSAPP: "whatsapp_id",
     }
 
-    def normalize_kz_phone(self, phone: str | None) -> str:
+    def normalize_kz_phone(self, phone: str | None) -> str | None:
         raw_phone = (phone or "").strip()
         if not raw_phone:
-            return ""
+            return None
 
         digits = "".join(symbol for symbol in raw_phone if symbol.isdigit())
         if len(digits) == 11 and digits.startswith("8"):
@@ -47,51 +47,55 @@ class ClientIdentityResolver:
         if channel == ConversationMessage.Channel.TELEGRAM and not external_id:
             raise ValidationError("Telegram messages require an external_id.")
 
-        with transaction.atomic():
-            client = None
+        client = None
+        if channel_field and external_id:
+            client = business.clients.filter(
+                **{channel_field: external_id}
+            ).first()
+        if client is None and phone:
+            client = business.clients.filter(phone=phone).first()
+
+        if client is None:
+            if not phone and channel != ConversationMessage.Channel.TELEGRAM:
+                raise ValidationError(
+                    "Phone number is required to create a new client."
+                )
+            create_kwargs = {
+                "business": business,
+                "name": name,
+                "external_id": external_id,
+            }
+            if phone:
+                create_kwargs["phone"] = phone
             if channel_field and external_id:
-                client = business.clients.filter(
-                    **{channel_field: external_id}
-                ).first()
-            if client is None and phone:
-                client = business.clients.filter(phone=phone).first()
-
-            if client is None:
-                if not phone and channel != ConversationMessage.Channel.TELEGRAM:
-                    raise ValidationError(
-                        "Phone number is required to create a new client."
-                    )
-                create_kwargs = {
-                    "business": business,
-                    "name": name,
-                    "external_id": external_id,
-                }
-                if phone:
-                    create_kwargs["phone"] = phone
-                if channel_field and external_id:
-                    create_kwargs[channel_field] = external_id
-                try:
+                create_kwargs[channel_field] = external_id
+            try:
+                with transaction.atomic():
                     return Client.objects.create(**create_kwargs)
-                except IntegrityError:
-                    if channel_field and external_id:
-                        existing = business.clients.filter(
-                            **{channel_field: external_id}
-                        ).first()
-                        if existing is not None:
-                            return existing
-                    return business.clients.get(phone=phone)
+            except IntegrityError:
+                if channel_field and external_id:
+                    existing = business.clients.filter(
+                        **{channel_field: external_id}
+                    ).first()
+                    if existing is not None:
+                        return existing
+                if phone:
+                    existing = business.clients.filter(phone=phone).first()
+                    if existing is not None:
+                        return existing
+                raise
 
-            update_fields = []
-            if name and client.name != name:
-                client.name = name
-                update_fields.append("name")
-            if external_id and client.external_id != external_id:
-                client.external_id = external_id
-                update_fields.append("external_id")
-            if channel_field and external_id and getattr(client, channel_field) != external_id:
-                setattr(client, channel_field, external_id)
-                update_fields.append(channel_field)
-            if update_fields:
-                update_fields.append("updated_at")
-                client.save(update_fields=update_fields)
-            return client
+        update_fields = []
+        if name and client.name != name:
+            client.name = name
+            update_fields.append("name")
+        if external_id and client.external_id != external_id:
+            client.external_id = external_id
+            update_fields.append("external_id")
+        if channel_field and external_id and getattr(client, channel_field) != external_id:
+            setattr(client, channel_field, external_id)
+            update_fields.append(channel_field)
+        if update_fields:
+            update_fields.append("updated_at")
+            client.save(update_fields=update_fields)
+        return client

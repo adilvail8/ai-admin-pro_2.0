@@ -1,0 +1,96 @@
+{% extends "admin/base.html" %}
+{% load i18n %}
+
+{% block title %}{% if subtitle %}{{ subtitle }} | {% endif %}{{ title }} | {{ site_title|default:_("Django site admin") }}{% endblock %}
+
+{% block branding %}
+    {% include "unfold/helpers/site_branding.html" %}
+{% endblock %}
+
+{% block content %}
+    {% if owner_dashboard %}
+        <section class="owner-dashboard">
+            <div class="owner-hero">
+                <div>
+                    <p class="owner-kicker">Кабинет салона</p>
+                    <h1>{{ owner_dashboard.business.display_brand_name|default:site_header }}</h1>
+                    <p>{{ owner_dashboard.business.city|default:"" }}{% if owner_dashboard.business.working_hours %} · {{ owner_dashboard.business.working_hours }}{% endif %}</p>
+                </div>
+                <div class="owner-actions">
+                    {% for action in owner_dashboard.quick_actions %}
+                        <a href="{{ action.href }}" class="owner-action">
+                            <span class="material-symbols-outlined">{{ action.icon }}</span>
+                            {{ action.label }}
+                        </a>
+                    {% endfor %}
+                </div>
+            </div>
+
+            <div class="owner-kpi-grid">
+                {% for card in owner_dashboard.cards %}
+                    <a href="{{ card.href }}" class="owner-kpi owner-kpi-{{ card.tone }}">
+                        <span class="material-symbols-outlined">{{ card.icon }}</span>
+                        <strong>{{ card.value }}</strong>
+                        <small>{{ card.label }}</small>
+                    </a>
+                {% endfor %}
+            </div>
+
+            <div class="owner-panels">
+                <section class="owner-panel">
+                    <div class="owner-panel-heading">
+                        <h2>Ближайшие записи</h2>
+                        <a href="{% url 'admin:bookings_booking_changelist' %}">Все записи</a>
+                    </div>
+                    {% if owner_dashboard.upcoming_bookings %}
+                        <div class="owner-list">
+                            {% for booking in owner_dashboard.upcoming_bookings %}
+                                <a class="owner-list-row" href="{% url 'admin:bookings_booking_change' booking.pk %}">
+                                    <span class="owner-row-time">{{ booking.start_time|date:"d.m H:i" }}</span>
+                                    <span>
+                                        <strong>{{ booking.service.name }}</strong>
+                                        <small>{{ booking.client }} · {{ booking.master.full_name }}</small>
+                                    </span>
+                                    <em>{{ booking.status }}</em>
+                                </a>
+                            {% endfor %}
+                        </div>
+                    {% else %}
+                        <p class="owner-empty">Пока нет ближайших записей.</p>
+                    {% endif %}
+                </section>
+
+                <section class="owner-panel">
+                    <div class="owner-panel-heading">
+                        <h2>Последние сообщения</h2>
+                        <a href="{% url 'admin:bookings_conversationmessage_inbox' %}">Открыть диалоги</a>
+                    </div>
+                    {% if owner_dashboard.recent_messages %}
+                        <div class="owner-list">
+                            {% for message in owner_dashboard.recent_messages %}
+                                <a class="owner-list-row" href="{% url 'admin:bookings_conversationmessage_inbox' %}?client={{ message.client_id }}">
+                                    <span class="owner-row-role">{{ message.role }}</span>
+                                    <span>
+                                        <strong>{{ message.client }}</strong>
+                                        <small>{{ message.content|truncatechars:88 }}</small>
+                                    </span>
+                                    <em>{{ message.created_at|date:"H:i" }}</em>
+                                </a>
+                            {% endfor %}
+                        </div>
+                    {% else %}
+                        <p class="owner-empty">Новых сообщений пока нет.</p>
+                    {% endif %}
+                </section>
+            </div>
+        </section>
+    {% else %}
+        <div class="flex flex-col lg:flex-row lg:gap-8">
+            <div class="grow">
+                {% include "unfold/helpers/app_list_default.html" %}
+            </div>
+
+            {% include "unfold/helpers/history.html" %}
+        </div>
+    {% endif %}
+{% endblock %}

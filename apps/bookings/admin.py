@@ -1,6 +1,16 @@
+from datetime import timedelta
+
+from django import forms
 from django.contrib import admin
 from django.contrib import messages
+from django.core.exceptions import ValidationError
+from django.db.models import Count, Max
+from django.shortcuts import redirect
+from django.template.response import TemplateResponse
+from django.urls import path, reverse
 from django.utils import timezone
+from django.utils.html import format_html
+from django.utils.module_loading import import_string
 from unfold.admin import ModelAdmin
 from unfold.decorators import display
 
@@ -21,7 +31,13 @@ from .models import (
     Service,
 )
 from .services import update_booking_status
-from .tasks import request_outbound_resend, request_outbound_retry
+from .tasks import (
+    dispatch_outbound_delivery,
+    get_client_channel,
+    get_client_recipient,
+    request_outbound_resend,
+    request_outbound_retry,
+)
 
 
 ADMIN_ROLES = {
@@ -46,17 +62,1027 @@ OUTBOUND_STATUS_LABELS = {
     OutboundMessage.Status.DEAD_LETTER: "danger",
 }
 
+TECHNICAL_AUDIT_EVENT_TYPES = {
+    "outbound_submitted",
+    "outbound_reply_queued",
+}
+
 
 def _get_request_business_ids(request):
-    if request.user.is_superuser:
+    user = getattr(request, "user", None)
+    if not getattr(user, "is_authenticated", False):
+        return []
+    if user.is_superuser:
         return None
     return list(
         BusinessMembership.objects.filter(
-            user=request.user,
+            user=user,
             is_active=True,
             role__in=ADMIN_ROLES,
         ).values_list("business_id", flat=True)
     )
+
+
+def get_request_business_memberships(request):
+    user = getattr(request, "user", None)
+    if not getattr(user, "is_authenticated", False) or user.is_superuser:
+        return BusinessMembership.objects.none()
+    return (
+        BusinessMembership.objects.select_related("business")
+        .filter(
+            user=user,
+            is_active=True,
+            role__in=ADMIN_ROLES,
+        )
+        .order_by("business__name")
+    )
+
+
+def is_business_owner_mode(request):
+    user = getattr(request, "user", None)
+    return bool(
+        getattr(user, "is_authenticated", False)
+        and not getattr(user, "is_superuser", False)
+        and get_request_business_memberships(request).exists()
+    )
+
+
+def is_single_business_owner_mode(request):
+    business_ids = _get_request_business_ids(request)
+    return bool(
+        business_ids
+        and business_ids is not None
+        and not getattr(getattr(request, "user", None), "is_superuser", False)
+        and len(business_ids) == 1
+    )
+
+
+def get_single_business_id(request):
+    business_ids = _get_request_business_ids(request)
+    if (
+        business_ids
+        and business_ids is not None
+        and not getattr(getattr(request, "user", None), "is_superuser", False)
+        and len(business_ids) == 1
+    ):
+        return business_ids[0]
+    return None
+
+
+def get_primary_business(request):
+    membership = get_request_business_memberships(request).first()
+    return membership.business if membership else None
+
+
+class OutboundMessageReplyForm(forms.ModelForm):
+    class Meta:
+        model = OutboundMessage
+        fields = ("client", "booking", "channel", "text")
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["channel"].choices = (
+            ("telegram", "Telegram"),
+            ("whatsapp", "WhatsApp"),
+        )
+
+    def clean(self):
+        cleaned_data = super().clean()
+        client = cleaned_data.get("client")
+        booking = cleaned_data.get("booking")
+        channel = cleaned_data.get("channel")
+        if client is None:
+            raise ValidationError({"client": "Выберите клиента."})
+        if booking is not None:
+            if booking.client_id != client.id:
+                raise ValidationError(
+                    {"booking": "Запись должна принадлежать выбранному клиенту."}
+                )
+            if booking.business_id != client.business_id:
+                raise ValidationError(
+                    {"booking": "Запись и клиент должны относиться к одному салону."}
+                )
+        if channel not in {"telegram", "whatsapp"}:
+            raise ValidationError({"channel": "Выберите канал ответа."})
+        if channel == "telegram" and not client.telegram_id:
+            raise ValidationError(
+                {"channel": "У клиента нет Telegram для ответа."}
+            )
+        if channel == "whatsapp" and not (client.whatsapp_id or client.phone):
+            raise ValidationError(
+                {"channel": "У клиента нет WhatsApp или телефона для ответа."}
+            )
+        return cleaned_data
+
+
+class OwnerInboxReplyForm(forms.Form):
+    client_id = forms.IntegerField(widget=forms.HiddenInput)
+    channel = forms.ChoiceField(
+        choices=(
+            ("telegram", "Telegram"),
+            ("whatsapp", "WhatsApp"),
+        ),
+        widget=forms.HiddenInput,
+    )
+    text = forms.CharField(
+        label="Сообщение",
+        widget=forms.Textarea(
+            attrs={
+                "rows": 3,
+                "placeholder": "Напишите ответ клиенту...",
+                "class": "owner-inbox-reply-textarea",
+            }
+        ),
+    )
+
+
+def site_header_callback(request):
+    if not is_business_owner_mode(request):
+        return "AI Admin Pro"
+    business = get_primary_business(request)
+    return business.display_brand_name if business else "AI Admin Pro"
+
+
+def site_title_callback(request):
+    if not is_business_owner_mode(request):
+        return "AI Admin Pro"
+    business = get_primary_business(request)
+    if business is None:
+        return "AI Admin Pro"
+    return f"{business.display_brand_name} | кабинет салона"
+
+
+def site_subheader_callback(request):
+    if not is_business_owner_mode(request):
+        return "Интеграторская панель"
+    business = get_primary_business(request)
+    if business is None:
+        return "Кабинет салона"
+    return f"{business.city} · кабинет салона"
+
+
+def _normalize_admin_text(value):
+    if not isinstance(value, str):
+        return value
+    if not any(marker in value for marker in ("Ð", "Ñ", "Ã", "Ä", "à", "Р", "Ў", "вЂ", "�")):
+        return value
+    for encoding in ("latin1", "cp1251"):
+        try:
+            candidate = value.encode(encoding).decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            continue
+        if not any(marker in candidate for marker in ("Ð", "Ñ", "Ã", "Ä", "à", "Р", "Ў", "вЂ", "�")):
+            return candidate
+    return value
+
+
+def _normalize_sidebar_navigation(navigation):
+    normalized = []
+    for group in navigation:
+        fixed_group = dict(group)
+        fixed_group["title"] = _normalize_admin_text(group.get("title"))
+        fixed_items = []
+        for item in group.get("items", []):
+            fixed_item = dict(item)
+            fixed_item["title"] = _normalize_admin_text(item.get("title"))
+            fixed_items.append(fixed_item)
+        fixed_group["items"] = fixed_items
+        normalized.append(fixed_group)
+    return normalized
+
+
+def _polish_sidebar_titles(navigation, request):
+    owner_mode = is_business_owner_mode(request)
+    item_titles = {
+        "bookings/booking": "Бронирования",
+        "bookings/client": "Клиенты",
+        "bookings/outboundmessage": "Сообщения клиентам" if owner_mode else "Исходящие сообщения",
+        "bookings/inboundevent": "Входящие события",
+        "bookings/business": "Настройки салона" if owner_mode else "Бизнесы",
+        "bookings/master": "Мастера",
+        "bookings/service": "Услуги",
+        "bookings/category": "Категории",
+        "bookings/auditlog": "Аудит",
+        "bookings/aiinteractionlog": "AI Логи",
+        "auth/user": "Пользователи",
+    }
+    for group in navigation:
+        for item in group.get("items", []):
+            link = str(item.get("link") or "")
+            for marker, title in item_titles.items():
+                if marker in link:
+                    item["title"] = title
+                    break
+    return navigation
+
+
+def _resolve_sidebar_badges(navigation, request):
+    resolved = []
+    for group in navigation:
+        fixed_group = dict(group)
+        group_badge = fixed_group.get("badge")
+        if isinstance(group_badge, str) and "." in group_badge:
+            badge_value = import_string(group_badge)(request)
+            if badge_value:
+                fixed_group["badge"] = str(badge_value)
+            else:
+                fixed_group.pop("badge", None)
+                fixed_group.pop("badge_callback", None)
+        fixed_items = []
+        for item in fixed_group.get("items", []):
+            fixed_item = dict(item)
+            item_badge = fixed_item.get("badge")
+            if isinstance(item_badge, str) and "." in item_badge:
+                badge_value = import_string(item_badge)(request)
+                if badge_value:
+                    fixed_item["badge"] = str(badge_value)
+                else:
+                    fixed_item.pop("badge", None)
+                    fixed_item.pop("badge_callback", None)
+            fixed_items.append(fixed_item)
+        fixed_group["items"] = fixed_items
+        resolved.append(fixed_group)
+    return resolved
+
+
+def canonical_site_title_callback(request):
+    return _normalize_admin_text(site_title_callback(request))
+
+
+def canonical_site_subheader_callback(request):
+    return _normalize_admin_text(site_subheader_callback(request))
+
+
+def canonical_sidebar_navigation(request):
+    navigation = _normalize_sidebar_navigation(get_clean_sidebar_navigation(request))
+    navigation = _polish_sidebar_titles(navigation, request)
+    return _resolve_sidebar_badges(navigation, request)
+
+
+def get_clean_sidebar_navigation(request):
+    if not is_business_owner_mode(request):
+        return [
+            {
+                "title": "Записи",
+                "icon": "calendar_month",
+                "items": [
+                    {
+                        "title": "Бронирования",
+                        "icon": "event",
+                        "link": reverse("admin:bookings_booking_changelist"),
+                        "badge": "apps.bookings.admin.booking_needs_attention_count",
+                    },
+                    {
+                        "title": "Клиенты",
+                        "icon": "people",
+                        "link": reverse("admin:bookings_client_changelist"),
+                    },
+                ],
+            },
+            {
+                "title": "Коммуникации",
+                "icon": "chat",
+                "items": [
+                    {
+                        "title": "Диалоги",
+                        "icon": "forum",
+                        "link": reverse("admin:bookings_conversationmessage_inbox"),
+                    },
+                    {
+                        "title": "Сообщения",
+                        "icon": "send",
+                        "link": reverse("admin:bookings_outboundmessage_changelist"),
+                        "badge": "apps.bookings.admin.failed_messages_count",
+                    },
+                    {
+                        "title": "Аудит",
+                        "icon": "history",
+                        "link": reverse("admin:bookings_auditlog_changelist"),
+                    },
+                ],
+            },
+            {
+                "title": "Справочники",
+                "icon": "settings",
+                "items": [
+                    {
+                        "title": "Бизнесы",
+                        "icon": "store",
+                        "link": reverse("admin:bookings_business_changelist"),
+                    },
+                    {
+                        "title": "Мастера",
+                        "icon": "person",
+                        "link": reverse("admin:bookings_master_changelist"),
+                    },
+                    {
+                        "title": "Услуги",
+                        "icon": "spa",
+                        "link": reverse("admin:bookings_service_changelist"),
+                    },
+                    {
+                        "title": "Категории",
+                        "icon": "category",
+                        "link": reverse("admin:bookings_category_changelist"),
+                    },
+                ],
+            },
+            {
+                "title": "Система",
+                "icon": "admin_panel_settings",
+                "items": [
+                    {
+                        "title": "AI логи",
+                        "icon": "psychology",
+                        "link": reverse("admin:bookings_aiinteractionlog_changelist"),
+                    },
+                    {
+                        "title": "Пользователи",
+                        "icon": "manage_accounts",
+                        "link": reverse("admin:auth_user_changelist"),
+                    },
+                ],
+            },
+        ]
+
+    return [
+        {
+            "title": "Записи",
+            "icon": "content_cut",
+            "items": [
+                {
+                    "title": "Бронирования",
+                    "icon": "event",
+                    "link": reverse("admin:bookings_booking_changelist"),
+                    "badge": "apps.bookings.admin.booking_needs_attention_count",
+                },
+                {
+                    "title": "Клиенты",
+                    "icon": "people",
+                    "link": reverse("admin:bookings_client_changelist"),
+                },
+                {
+                    "title": "Мастера",
+                    "icon": "person",
+                    "link": reverse("admin:bookings_master_changelist"),
+                },
+                {
+                    "title": "Услуги",
+                    "icon": "spa",
+                    "link": reverse("admin:bookings_service_changelist"),
+                },
+                {
+                    "title": "Категории",
+                    "icon": "category",
+                    "link": reverse("admin:bookings_category_changelist"),
+                },
+                {
+                    "title": "Настройки салона",
+                    "icon": "store",
+                    "link": _build_owner_business_link(request),
+                },
+            ],
+        },
+        {
+            "title": "Переписка",
+            "icon": "chat",
+            "items": [
+                {
+                    "title": "Диалоги",
+                    "icon": "forum",
+                    "link": reverse("admin:bookings_conversationmessage_inbox"),
+                },
+            ],
+        },
+    ]
+
+
+def owner_admin_styles(request):
+    return "/static/bookings/css/owner_admin.css"
+
+
+def _build_owner_business_link(request):
+    business = get_primary_business(request)
+    if business is None:
+        return reverse("admin:bookings_business_changelist")
+    return reverse("admin:bookings_business_change", args=[business.pk])
+
+
+def get_sidebar_navigation(request):
+    if not is_business_owner_mode(request):
+        return [
+            {
+                "title": "Записи",
+                "icon": "calendar_month",
+                "items": [
+                    {
+                        "title": "Бронирования",
+                        "icon": "event",
+                        "link": reverse("admin:bookings_booking_changelist"),
+                        "badge": "apps.bookings.admin.booking_needs_attention_count",
+                    },
+                    {
+                        "title": "Клиенты",
+                        "icon": "people",
+                        "link": reverse("admin:bookings_client_changelist"),
+                    },
+                ],
+            },
+            {
+                "title": "Коммуникации",
+                "icon": "chat",
+                "items": [
+                    {
+                        "title": "Исходящие сообщения",
+                        "icon": "send",
+                        "link": reverse("admin:bookings_outboundmessage_changelist"),
+                        "badge": "apps.bookings.admin.failed_messages_count",
+                    },
+                    {
+                        "title": "Входящие события",
+                        "icon": "inbox",
+                        "link": reverse("admin:bookings_inboundevent_changelist"),
+                    },
+                ],
+            },
+            {
+                "title": "Справочники",
+                "icon": "settings",
+                "items": [
+                    {
+                        "title": "Бизнесы",
+                        "icon": "store",
+                        "link": reverse("admin:bookings_business_changelist"),
+                    },
+                    {
+                        "title": "Мастера",
+                        "icon": "person",
+                        "link": reverse("admin:bookings_master_changelist"),
+                    },
+                    {
+                        "title": "Услуги",
+                        "icon": "spa",
+                        "link": reverse("admin:bookings_service_changelist"),
+                    },
+                    {
+                        "title": "Категории",
+                        "icon": "category",
+                        "link": reverse("admin:bookings_category_changelist"),
+                    },
+                ],
+            },
+            {
+                "title": "Система",
+                "icon": "admin_panel_settings",
+                "items": [
+                    {
+                        "title": "Аудит",
+                        "icon": "history",
+                        "link": reverse("admin:bookings_auditlog_changelist"),
+                    },
+                    {
+                        "title": "AI Логи",
+                        "icon": "psychology",
+                        "link": reverse("admin:bookings_aiinteractionlog_changelist"),
+                    },
+                    {
+                        "title": "Пользователи",
+                        "icon": "manage_accounts",
+                        "link": reverse("admin:auth_user_changelist"),
+                    },
+                ],
+            },
+        ]
+
+    return [
+        {
+            "title": "Управление",
+            "icon": "content_cut",
+            "items": [
+                {
+                    "title": "Записи",
+                    "icon": "event",
+                    "link": reverse("admin:bookings_booking_changelist"),
+                    "badge": "apps.bookings.admin.booking_needs_attention_count",
+                },
+                {
+                    "title": "Клиенты",
+                    "icon": "people",
+                    "link": reverse("admin:bookings_client_changelist"),
+                },
+                {
+                    "title": "Мастера",
+                    "icon": "person",
+                    "link": reverse("admin:bookings_master_changelist"),
+                },
+                {
+                    "title": "Услуги",
+                    "icon": "spa",
+                    "link": reverse("admin:bookings_service_changelist"),
+                },
+                {
+                    "title": "Категории",
+                    "icon": "category",
+                    "link": reverse("admin:bookings_category_changelist"),
+                },
+                {
+                    "title": "Настройки салона",
+                    "icon": "store",
+                    "link": _build_owner_business_link(request),
+                },
+            ],
+        },
+        {
+            "title": "Переписка",
+            "icon": "chat",
+            "items": [
+                {
+                    "title": "Сообщения клиентам",
+                    "icon": "send",
+                    "link": reverse("admin:bookings_outboundmessage_changelist"),
+                    "badge": "apps.bookings.admin.failed_messages_count",
+                },
+            ],
+        },
+    ]
+
+
+def _sidebar_text_needs_repair_final(value):
+    if not isinstance(value, str):
+        return False
+    return any(marker in value for marker in ("Ð", "Ñ", "Ã", "Ä", "à", "Р", "Ў", "вЂ", "�"))
+
+
+def _repair_sidebar_text_final(value):
+    if not _sidebar_text_needs_repair_final(value):
+        return value
+    for encoding in ("latin1", "cp1251"):
+        try:
+            candidate = value.encode(encoding).decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            continue
+        if not _sidebar_text_needs_repair_final(candidate):
+            return candidate
+    return value
+
+
+def _repair_sidebar_navigation_final(navigation):
+    repaired_navigation = []
+    for group in navigation:
+        repaired_group = dict(group)
+        repaired_group["title"] = _repair_sidebar_text_final(group.get("title"))
+        repaired_group["items"] = []
+        for item in group.get("items", []):
+            repaired_item = dict(item)
+            repaired_item["title"] = _repair_sidebar_text_final(item.get("title"))
+            repaired_group["items"].append(repaired_item)
+        repaired_navigation.append(repaired_group)
+    return repaired_navigation
+
+
+_owner_sidebar_navigation_impl_final = get_sidebar_navigation
+_owner_site_title_callback_impl_final = site_title_callback
+_owner_site_subheader_callback_impl_final = site_subheader_callback
+
+
+def get_sidebar_navigation(request):
+    return _repair_sidebar_navigation_final(_owner_sidebar_navigation_impl_final(request))
+
+
+def site_title_callback(request):
+    return _repair_sidebar_text_final(_owner_site_title_callback_impl_final(request))
+
+
+def site_subheader_callback(request):
+    return _repair_sidebar_text_final(_owner_site_subheader_callback_impl_final(request))
+
+
+def _sidebar_text_needs_repair(value):
+    if not isinstance(value, str):
+        return False
+    return any(marker in value for marker in ("Ð", "Ñ", "Ã", "Ä", "à", "Р", "Ў", "вЂ", "�"))
+
+
+def _repair_sidebar_text(value):
+    if not _sidebar_text_needs_repair(value):
+        return value
+    for encoding in ("latin1", "cp1251"):
+        try:
+            candidate = value.encode(encoding).decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            continue
+        if not _sidebar_text_needs_repair(candidate):
+            return candidate
+    return value
+
+
+def _repair_sidebar_structure(navigation):
+    repaired_navigation = []
+    for group in navigation:
+        repaired_group = dict(group)
+        repaired_group["title"] = _repair_sidebar_text(group.get("title"))
+        repaired_group["items"] = []
+        for item in group.get("items", []):
+            repaired_item = dict(item)
+            repaired_item["title"] = _repair_sidebar_text(item.get("title"))
+            repaired_group["items"].append(repaired_item)
+        repaired_navigation.append(repaired_group)
+    return repaired_navigation
+
+
+_final_sidebar_navigation_impl = get_sidebar_navigation
+_final_site_title_callback_impl = site_title_callback
+_final_site_subheader_callback_impl = site_subheader_callback
+
+
+def get_sidebar_navigation(request):
+    return _repair_sidebar_structure(_final_sidebar_navigation_impl(request))
+
+
+def site_title_callback(request):
+    return _repair_sidebar_text(_final_site_title_callback_impl(request))
+
+
+def site_subheader_callback(request):
+    return _repair_sidebar_text(_final_site_subheader_callback_impl(request))
+
+
+def _contains_mojibake_text(value: str) -> bool:
+    markers = ("Ð", "Ñ", "Ã", "Ä", "à", "Р", "Ў", "вЂ", "�")
+    return any(marker in value for marker in markers)
+
+
+def _repair_admin_text_safe(value):
+    if not isinstance(value, str) or not _contains_mojibake_text(value):
+        return value
+    for encoding in ("latin1", "cp1251"):
+        try:
+            candidate = value.encode(encoding).decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            continue
+        if not _contains_mojibake_text(candidate):
+            return candidate
+    return value
+
+
+def _repair_sidebar_navigation_safe(navigation):
+    repaired = []
+    for group in navigation:
+        fixed_group = dict(group)
+        fixed_group["title"] = _repair_admin_text_safe(group.get("title"))
+        fixed_items = []
+        for item in group.get("items", []):
+            fixed_item = dict(item)
+            fixed_item["title"] = _repair_admin_text_safe(item.get("title"))
+            fixed_items.append(fixed_item)
+        fixed_group["items"] = fixed_items
+        repaired.append(fixed_group)
+    return repaired
+
+
+_sidebar_navigation_impl = get_sidebar_navigation
+
+
+def get_sidebar_navigation(request):
+    return _repair_sidebar_navigation_safe(_sidebar_navigation_impl(request))
+
+
+_site_title_callback_impl = site_title_callback
+_site_subheader_callback_impl = site_subheader_callback
+
+
+def site_title_callback(request):
+    return _repair_admin_text_safe(_site_title_callback_impl(request))
+
+
+def site_subheader_callback(request):
+    return _repair_admin_text_safe(_site_subheader_callback_impl(request))
+
+
+def get_sidebar_navigation(request):
+    if not is_business_owner_mode(request):
+        return [
+            {
+                "title": "\u0417\u0430\u043f\u0438\u0441\u0438",
+                "icon": "calendar_month",
+                "items": [
+                    {
+                        "title": "\u0411\u0440\u043e\u043d\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f",
+                        "icon": "event",
+                        "link": reverse("admin:bookings_booking_changelist"),
+                        "badge": "apps.bookings.admin.booking_needs_attention_count",
+                    },
+                    {
+                        "title": "\u041a\u043b\u0438\u0435\u043d\u0442\u044b",
+                        "icon": "people",
+                        "link": reverse("admin:bookings_client_changelist"),
+                    },
+                ],
+            },
+            {
+                "title": "\u041a\u043e\u043c\u043c\u0443\u043d\u0438\u043a\u0430\u0446\u0438\u0438",
+                "icon": "chat",
+                "items": [
+                    {
+                        "title": "\u0418\u0441\u0445\u043e\u0434\u044f\u0449\u0438\u0435 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u044f",
+                        "icon": "send",
+                        "link": reverse("admin:bookings_outboundmessage_changelist"),
+                        "badge": "apps.bookings.admin.failed_messages_count",
+                    },
+                    {
+                        "title": "\u0412\u0445\u043e\u0434\u044f\u0449\u0438\u0435 \u0441\u043e\u0431\u044b\u0442\u0438\u044f",
+                        "icon": "inbox",
+                        "link": reverse("admin:bookings_inboundevent_changelist"),
+                    },
+                ],
+            },
+            {
+                "title": "\u0421\u043f\u0440\u0430\u0432\u043e\u0447\u043d\u0438\u043a\u0438",
+                "icon": "settings",
+                "items": [
+                    {
+                        "title": "\u0411\u0438\u0437\u043d\u0435\u0441\u044b",
+                        "icon": "store",
+                        "link": reverse("admin:bookings_business_changelist"),
+                    },
+                    {
+                        "title": "\u041c\u0430\u0441\u0442\u0435\u0440\u0430",
+                        "icon": "person",
+                        "link": reverse("admin:bookings_master_changelist"),
+                    },
+                    {
+                        "title": "\u0423\u0441\u043b\u0443\u0433\u0438",
+                        "icon": "spa",
+                        "link": reverse("admin:bookings_service_changelist"),
+                    },
+                    {
+                        "title": "\u041a\u0430\u0442\u0435\u0433\u043e\u0440\u0438\u0438",
+                        "icon": "category",
+                        "link": reverse("admin:bookings_category_changelist"),
+                    },
+                ],
+            },
+            {
+                "title": "\u0421\u0438\u0441\u0442\u0435\u043c\u0430",
+                "icon": "admin_panel_settings",
+                "items": [
+                    {
+                        "title": "\u0410\u0443\u0434\u0438\u0442",
+                        "icon": "history",
+                        "link": reverse("admin:bookings_auditlog_changelist"),
+                    },
+                    {
+                        "title": "AI \u041b\u043e\u0433\u0438",
+                        "icon": "psychology",
+                        "link": reverse("admin:bookings_aiinteractionlog_changelist"),
+                    },
+                    {
+                        "title": "\u041f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u0438",
+                        "icon": "manage_accounts",
+                        "link": reverse("admin:auth_user_changelist"),
+                    },
+                ],
+            },
+        ]
+
+    return [
+        {
+            "title": "\u0423\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u0435",
+            "icon": "content_cut",
+            "items": [
+                {
+                    "title": "\u0417\u0430\u043f\u0438\u0441\u0438",
+                    "icon": "event",
+                    "link": reverse("admin:bookings_booking_changelist"),
+                    "badge": "apps.bookings.admin.booking_needs_attention_count",
+                },
+                {
+                    "title": "\u041a\u043b\u0438\u0435\u043d\u0442\u044b",
+                    "icon": "people",
+                    "link": reverse("admin:bookings_client_changelist"),
+                },
+                {
+                    "title": "\u041c\u0430\u0441\u0442\u0435\u0440\u0430",
+                    "icon": "person",
+                    "link": reverse("admin:bookings_master_changelist"),
+                },
+                {
+                    "title": "\u0423\u0441\u043b\u0443\u0433\u0438",
+                    "icon": "spa",
+                    "link": reverse("admin:bookings_service_changelist"),
+                },
+                {
+                    "title": "\u041a\u0430\u0442\u0435\u0433\u043e\u0440\u0438\u0438",
+                    "icon": "category",
+                    "link": reverse("admin:bookings_category_changelist"),
+                },
+                {
+                    "title": "\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u0441\u0430\u043b\u043e\u043d\u0430",
+                    "icon": "store",
+                    "link": _build_owner_business_link(request),
+                },
+            ],
+        },
+        {
+            "title": "\u041f\u0435\u0440\u0435\u043f\u0438\u0441\u043a\u0430",
+            "icon": "chat",
+            "items": [
+                {
+                    "title": "\u0414\u0438\u0430\u043b\u043e\u0433\u0438",
+                    "icon": "forum",
+                    "link": reverse("admin:bookings_conversationmessage_inbox"),
+                },
+                {
+                    "title": "\u0421\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u044f \u043a\u043b\u0438\u0435\u043d\u0442\u0430\u043c",
+                    "icon": "send",
+                    "link": reverse("admin:bookings_outboundmessage_changelist"),
+                    "badge": "apps.bookings.admin.failed_messages_count",
+                },
+            ],
+        },
+    ]
+
+
+def get_sidebar_navigation(request):
+    if not is_business_owner_mode(request):
+        return [
+            {
+                "title": "\u0417\u0430\u043f\u0438\u0441\u0438",
+                "icon": "calendar_month",
+                "items": [
+                    {
+                        "title": "\u0411\u0440\u043e\u043d\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f",
+                        "icon": "event",
+                        "link": reverse("admin:bookings_booking_changelist"),
+                        "badge": "apps.bookings.admin.booking_needs_attention_count",
+                    },
+                    {
+                        "title": "\u041a\u043b\u0438\u0435\u043d\u0442\u044b",
+                        "icon": "people",
+                        "link": reverse("admin:bookings_client_changelist"),
+                    },
+                ],
+            },
+            {
+                "title": "\u041a\u043e\u043c\u043c\u0443\u043d\u0438\u043a\u0430\u0446\u0438\u0438",
+                "icon": "chat",
+                "items": [
+                    {
+                        "title": "\u0418\u0441\u0445\u043e\u0434\u044f\u0449\u0438\u0435 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u044f",
+                        "icon": "send",
+                        "link": reverse("admin:bookings_outboundmessage_changelist"),
+                        "badge": "apps.bookings.admin.failed_messages_count",
+                    },
+                    {
+                        "title": "\u0412\u0445\u043e\u0434\u044f\u0449\u0438\u0435 \u0441\u043e\u0431\u044b\u0442\u0438\u044f",
+                        "icon": "inbox",
+                        "link": reverse("admin:bookings_inboundevent_changelist"),
+                    },
+                ],
+            },
+            {
+                "title": "\u0421\u043f\u0440\u0430\u0432\u043e\u0447\u043d\u0438\u043a\u0438",
+                "icon": "settings",
+                "items": [
+                    {
+                        "title": "\u0411\u0438\u0437\u043d\u0435\u0441\u044b",
+                        "icon": "store",
+                        "link": reverse("admin:bookings_business_changelist"),
+                    },
+                    {
+                        "title": "\u041c\u0430\u0441\u0442\u0435\u0440\u0430",
+                        "icon": "person",
+                        "link": reverse("admin:bookings_master_changelist"),
+                    },
+                    {
+                        "title": "\u0423\u0441\u043b\u0443\u0433\u0438",
+                        "icon": "spa",
+                        "link": reverse("admin:bookings_service_changelist"),
+                    },
+                    {
+                        "title": "\u041a\u0430\u0442\u0435\u0433\u043e\u0440\u0438\u0438",
+                        "icon": "category",
+                        "link": reverse("admin:bookings_category_changelist"),
+                    },
+                ],
+            },
+            {
+                "title": "\u0421\u0438\u0441\u0442\u0435\u043c\u0430",
+                "icon": "admin_panel_settings",
+                "items": [
+                    {
+                        "title": "\u0410\u0443\u0434\u0438\u0442",
+                        "icon": "history",
+                        "link": reverse("admin:bookings_auditlog_changelist"),
+                    },
+                    {
+                        "title": "AI \u041b\u043e\u0433\u0438",
+                        "icon": "psychology",
+                        "link": reverse("admin:bookings_aiinteractionlog_changelist"),
+                    },
+                    {
+                        "title": "\u041f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u0438",
+                        "icon": "manage_accounts",
+                        "link": reverse("admin:auth_user_changelist"),
+                    },
+                ],
+            },
+        ]
+
+    return [
+        {
+            "title": "\u0423\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u0435",
+            "icon": "content_cut",
+            "items": [
+                {
+                    "title": "\u0417\u0430\u043f\u0438\u0441\u0438",
+                    "icon": "event",
+                    "link": reverse("admin:bookings_booking_changelist"),
+                    "badge": "apps.bookings.admin.booking_needs_attention_count",
+                },
+                {
+                    "title": "\u041a\u043b\u0438\u0435\u043d\u0442\u044b",
+                    "icon": "people",
+                    "link": reverse("admin:bookings_client_changelist"),
+                },
+                {
+                    "title": "\u041c\u0430\u0441\u0442\u0435\u0440\u0430",
+                    "icon": "person",
+                    "link": reverse("admin:bookings_master_changelist"),
+                },
+                {
+                    "title": "\u0423\u0441\u043b\u0443\u0433\u0438",
+                    "icon": "spa",
+                    "link": reverse("admin:bookings_service_changelist"),
+                },
+                {
+                    "title": "\u041a\u0430\u0442\u0435\u0433\u043e\u0440\u0438\u0438",
+                    "icon": "category",
+                    "link": reverse("admin:bookings_category_changelist"),
+                },
+                {
+                    "title": "\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u0441\u0430\u043b\u043e\u043d\u0430",
+                    "icon": "store",
+                    "link": _build_owner_business_link(request),
+                },
+            ],
+        },
+        {
+            "title": "\u041f\u0435\u0440\u0435\u043f\u0438\u0441\u043a\u0430",
+            "icon": "chat",
+            "items": [
+                {
+                    "title": "\u0414\u0438\u0430\u043b\u043e\u0433\u0438",
+                    "icon": "forum",
+                    "link": reverse("admin:bookings_conversationmessage_inbox"),
+                },
+                {
+                    "title": "\u0421\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u044f \u043a\u043b\u0438\u0435\u043d\u0442\u0430\u043c",
+                    "icon": "send",
+                    "link": reverse("admin:bookings_outboundmessage_changelist"),
+                    "badge": "apps.bookings.admin.failed_messages_count",
+                },
+            ],
+        },
+    ]
+
+
+_final_raw_get_sidebar_navigation = get_sidebar_navigation
+
+
+def get_sidebar_navigation(request):
+    return _repair_sidebar_navigation(_final_raw_get_sidebar_navigation(request))
+
+
+def _repair_admin_text(value):
+    if not isinstance(value, str):
+        return value
+    try:
+        repaired = value.encode("cp1251").decode("utf-8")
+        return repaired
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        try:
+            repaired = value.encode("latin1").decode("utf-8")
+            return repaired
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            return value
+
+
+def _repair_sidebar_navigation(value):
+    if isinstance(value, list):
+        return [_repair_sidebar_navigation(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _repair_sidebar_navigation(item) for key, item in value.items()}
+    if isinstance(value, str):
+        return _repair_admin_text(value)
+    return value
+
+
+_raw_get_sidebar_navigation = get_sidebar_navigation
+
+
+def get_sidebar_navigation(request):
+    return _repair_sidebar_navigation(_raw_get_sidebar_navigation(request))
 
 
 def booking_needs_attention_count(request):
@@ -65,7 +1091,7 @@ def booking_needs_attention_count(request):
     if business_ids is not None:
         queryset = queryset.filter(business_id__in=business_ids)
     count = queryset.count()
-    return str(count) if count else None
+    return str(count) if count else ""
 
 
 def failed_messages_count(request):
@@ -79,7 +1105,7 @@ def failed_messages_count(request):
     if business_ids is not None:
         queryset = queryset.filter(business_id__in=business_ids)
     count = queryset.count()
-    return str(count) if count else None
+    return str(count) if count else ""
 
 
 def dashboard_callback(request, context):
@@ -105,12 +1131,82 @@ def dashboard_callback(request, context):
         status=Booking.Status.NEEDS_ATTENTION
     ).count()
     context["failed_messages"] = failed_messages.count()
+
+    if is_business_owner_mode(request):
+        business = get_primary_business(request)
+        owner_bookings = Booking.objects.filter(business=business) if business else Booking.objects.none()
+        owner_messages = (
+            ConversationMessage.objects.filter(business=business)
+            if business
+            else ConversationMessage.objects.none()
+        )
+        today_bookings = owner_bookings.filter(start_time__date=today)
+        upcoming_bookings = owner_bookings.filter(
+            start_time__date__gte=today,
+            status__in=[Booking.Status.CONFIRMED, Booking.Status.PENDING],
+        ).select_related("client", "master", "service")[:5]
+        recent_messages = owner_messages.select_related("client").order_by("-created_at")[:6]
+
+        context["owner_dashboard"] = {
+            "business": business,
+            "cards": [
+                {
+                    "label": "\u0417\u0430\u043f\u0438\u0441\u0438 \u0441\u0435\u0433\u043e\u0434\u043d\u044f",
+                    "value": today_bookings.count(),
+                    "icon": "event_available",
+                    "tone": "green",
+                    "href": reverse("admin:bookings_booking_changelist"),
+                },
+                {
+                    "label": "\u041d\u0443\u0436\u043d\u0430 \u0440\u0435\u0430\u043a\u0446\u0438\u044f",
+                    "value": owner_bookings.filter(status=Booking.Status.NEEDS_ATTENTION).count(),
+                    "icon": "priority_high",
+                    "tone": "amber",
+                    "href": reverse("admin:bookings_booking_changelist"),
+                },
+                {
+                    "label": "\u041a\u043b\u0438\u0435\u043d\u0442\u044b",
+                    "value": Client.objects.filter(business=business).count() if business else 0,
+                    "icon": "groups",
+                    "tone": "blue",
+                    "href": reverse("admin:bookings_client_changelist"),
+                },
+                {
+                    "label": "\u041d\u043e\u0432\u044b\u0435 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u044f",
+                    "value": owner_messages.filter(role=ConversationMessage.Role.USER).count(),
+                    "icon": "mark_unread_chat_alt",
+                    "tone": "red",
+                    "href": reverse("admin:bookings_conversationmessage_inbox"),
+                },
+            ],
+            "quick_actions": [
+                {
+                    "label": "\u041e\u0442\u043a\u0440\u044b\u0442\u044c \u0434\u0438\u0430\u043b\u043e\u0433\u0438",
+                    "icon": "forum",
+                    "href": reverse("admin:bookings_conversationmessage_inbox"),
+                },
+                {
+                    "label": "\u041d\u043e\u0432\u0430\u044f \u0437\u0430\u043f\u0438\u0441\u044c",
+                    "icon": "add_circle",
+                    "href": reverse("admin:bookings_booking_add"),
+                },
+                {
+                    "label": "\u0423\u0441\u043b\u0443\u0433\u0438",
+                    "icon": "content_cut",
+                    "href": reverse("admin:bookings_service_changelist"),
+                },
+            ],
+            "upcoming_bookings": upcoming_bookings,
+            "recent_messages": recent_messages,
+        }
     return context
 
 
 class TenantScopedAdminMixin:
     business_filter_field = "business"
     business_related_fields = ()
+    owner_hidden_list_columns = ("business",)
+    owner_hidden_filters = ("business",)
 
     def get_admin_business_ids(self, request):
         return _get_request_business_ids(request)
@@ -153,6 +1249,17 @@ class TenantScopedAdminMixin:
     def get_object_business_id(self, obj):
         return getattr(obj, f"{self.business_filter_field}_id", None)
 
+    def get_exclude(self, request, obj=None):
+        exclude = list(super().get_exclude(request, obj) or [])
+        single_business_id = get_single_business_id(request)
+        if (
+            single_business_id is not None
+            and self.business_filter_field != "pk"
+            and self.business_filter_field not in exclude
+        ):
+            exclude.append(self.business_filter_field)
+        return exclude
+
     def formfield_for_foreignkey(self, db_field, request, **kwargs):
         field_name = db_field.name
         if field_name == self.business_filter_field:
@@ -166,6 +1273,33 @@ class TenantScopedAdminMixin:
                 queryset = queryset.filter(is_active=True)
             kwargs["queryset"] = queryset
         return super().formfield_for_foreignkey(db_field, request, **kwargs)
+
+    def get_list_display(self, request):
+        list_display = list(super().get_list_display(request))
+        if is_single_business_owner_mode(request):
+            list_display = [
+                item for item in list_display if item not in self.owner_hidden_list_columns
+            ]
+        return list_display
+
+    def get_list_filter(self, request):
+        list_filter = list(super().get_list_filter(request))
+        if is_single_business_owner_mode(request):
+            list_filter = [
+                item for item in list_filter if item not in self.owner_hidden_filters
+            ]
+        return list_filter
+
+    def save_model(self, request, obj, form, change):
+        single_business_id = get_single_business_id(request)
+        if (
+            single_business_id is not None
+            and self.business_filter_field != "pk"
+            and hasattr(obj, f"{self.business_filter_field}_id")
+            and getattr(obj, f"{self.business_filter_field}_id", None) is None
+        ):
+            setattr(obj, f"{self.business_filter_field}_id", single_business_id)
+        return super().save_model(request, obj, form, change)
 
 
 @admin.register(Business)
@@ -240,6 +1374,8 @@ class ClientAdmin(TenantScopedAdminMixin, ModelAdmin):
         "phone",
         "telegram_id",
         "whatsapp_id",
+        "dialogs_link",
+        "reply_link",
         "ai_failure_count",
         "colored_active",
     )
@@ -249,6 +1385,16 @@ class ClientAdmin(TenantScopedAdminMixin, ModelAdmin):
     @display(description="Активен", label={True: "success", False: "danger"})
     def colored_active(self, obj):
         return obj.is_active
+
+    @display(description="Диалог")
+    def dialogs_link(self, obj):
+        url = f"{reverse('admin:bookings_conversationmessage_inbox')}?client={obj.id}"
+        return format_html('<a href="{}">Открыть</a>', url)
+
+    @display(description="Ответ")
+    def reply_link(self, obj):
+        url = f"{reverse('admin:bookings_conversationmessage_inbox')}?client={obj.id}"
+        return format_html('<a href="{}">Написать</a>', url)
 
 
 @admin.register(Booking)
@@ -408,9 +1554,279 @@ class BookingAdmin(TenantScopedAdminMixin, ModelAdmin):
 @admin.register(ConversationMessage)
 class ConversationMessageAdmin(TenantScopedAdminMixin, ModelAdmin):
     business_related_fields = ("client",)
-    list_display = ("id", "business", "client", "channel", "role", "created_at")
+    list_display = (
+        "created_at",
+        "client",
+        "channel",
+        "role",
+        "short_content",
+        "reply_link",
+        "business",
+    )
+    list_display_links = ("created_at", "client")
     list_filter = ("business", "channel", "role")
     search_fields = ("client__phone", "content")
+
+    def has_add_permission(self, request):
+        return False
+
+    def changelist_view(self, request, extra_context=None):
+        if is_business_owner_mode(request):
+            return redirect(reverse("admin:bookings_conversationmessage_inbox"))
+        return super().changelist_view(request, extra_context=extra_context)
+
+    @display(description="Сообщение")
+    def short_content(self, obj):
+        content = (obj.content or "").strip().replace("\n", " ")
+        return content if len(content) <= 90 else f"{content[:87]}..."
+
+    @display(description="Ответ")
+    def reply_link(self, obj):
+        url = (
+            f"{reverse('admin:bookings_outboundmessage_add')}"
+            f"?client={obj.client_id}&channel={obj.channel}"
+        )
+        return format_html('<a href="{}">Ответить</a>', url)
+
+
+    def get_urls(self):
+        return [
+            path(
+                "inbox/",
+                self.admin_site.admin_view(self.inbox_view),
+                name="bookings_conversationmessage_inbox",
+            ),
+            *super().get_urls(),
+        ]
+
+    def get_inbox_client_queryset(self, request):
+        queryset = Client.objects.select_related("business")
+        business_ids = self.get_admin_business_ids(request)
+        if business_ids is not None:
+            queryset = queryset.filter(business_id__in=business_ids)
+        return queryset.annotate(
+            last_message_at=Max("conversation_messages__created_at"),
+            message_count=Count("conversation_messages"),
+        ).filter(message_count__gt=0)
+
+    def get_selected_inbox_client(self, request, clients_queryset):
+        client_id = request.GET.get("client") or request.POST.get("client_id")
+        if client_id:
+            try:
+                return clients_queryset.get(pk=client_id)
+            except (Client.DoesNotExist, ValueError):
+                return None
+        return clients_queryset.order_by("-last_message_at", "name").first()
+
+    def get_inbox_dialogs(self, clients_queryset, *, status_filter: str = "all"):
+        dialogs = []
+        now = timezone.now()
+        stale_threshold = now - timedelta(hours=2)
+        active_threshold = now - timedelta(days=7)
+        for client in clients_queryset.order_by("-last_message_at", "name")[:60]:
+            last_message = (
+                ConversationMessage.objects.filter(client=client)
+                .order_by("-created_at", "-id")
+                .first()
+            )
+            last_user_message = (
+                ConversationMessage.objects.filter(
+                    client=client,
+                    role=ConversationMessage.Role.USER,
+                )
+                .order_by("-created_at", "-id")
+                .first()
+            )
+            last_reply_message = (
+                ConversationMessage.objects.filter(
+                    client=client,
+                    role__in=[
+                        ConversationMessage.Role.ASSISTANT,
+                        ConversationMessage.Role.TOOL,
+                        ConversationMessage.Role.SYSTEM,
+                    ],
+                )
+                .order_by("-created_at", "-id")
+                .first()
+            )
+            needs_attention = bool(
+                last_user_message
+                and (
+                    last_reply_message is None
+                    or last_user_message.created_at > last_reply_message.created_at
+                )
+            )
+            is_stale = bool(
+                needs_attention
+                and last_user_message
+                and last_user_message.created_at <= stale_threshold
+            )
+            is_active = bool(client.last_message_at and client.last_message_at >= active_threshold)
+            if status_filter == "active" and not is_active:
+                continue
+            if status_filter == "attention" and not needs_attention:
+                continue
+            dialogs.append(
+                {
+                    "client": client,
+                    "last_message": last_message,
+                    "channel": get_client_channel(client),
+                    "message_count": client.message_count,
+                    "last_message_at": client.last_message_at,
+                    "needs_attention": needs_attention,
+                    "is_stale": is_stale,
+                }
+            )
+        return dialogs
+
+    def send_owner_inbox_reply(self, request, *, client, channel: str, text: str):
+        if channel == "unknown":
+            raise ValidationError("У клиента нет канала для ответа.")
+        if channel == "telegram" and not client.telegram_id:
+            raise ValidationError("У клиента нет Telegram для ответа.")
+        if channel == "whatsapp" and not (client.whatsapp_id or client.phone):
+            raise ValidationError("У клиента нет WhatsApp или телефона для ответа.")
+
+        outbound_message = OutboundMessage.objects.create(
+            business=client.business,
+            client=client,
+            channel=channel,
+            recipient=get_client_recipient(client, channel),
+            message_type="manual_reply",
+            text=text,
+        )
+        ConversationMessage.objects.create(
+            business=client.business,
+            client=client,
+            channel=channel,
+            role=ConversationMessage.Role.ASSISTANT,
+            content=text,
+        )
+        create_audit_log(
+            business=client.business,
+            client=client,
+            outbound_message=outbound_message,
+            actor_type="human",
+            event_type="manual_reply_sent",
+            channel=channel,
+            payload={
+                "source": "owner_inbox",
+                "actor_id": request.user.id,
+                "actor_name": request.user.get_username(),
+            },
+        )
+        return dispatch_outbound_delivery(outbound_message.id)
+
+    def inbox_view(self, request):
+        status_filter = request.GET.get("status") or "all"
+        if status_filter not in {"all", "active", "attention"}:
+            status_filter = "all"
+        clients_queryset = self.get_inbox_client_queryset(request)
+        dialogs = self.get_inbox_dialogs(clients_queryset, status_filter=status_filter)
+        selected_client = self.get_selected_inbox_client(request, clients_queryset)
+        if selected_client is None and dialogs:
+            selected_client = dialogs[0]["client"]
+        elif selected_client is not None and not any(
+            dialog["client"].pk == selected_client.pk for dialog in dialogs
+        ):
+            selected_client = dialogs[0]["client"] if dialogs else selected_client
+
+        if request.method == "POST":
+            form = OwnerInboxReplyForm(request.POST)
+            if form.is_valid():
+                selected_client = self.get_selected_inbox_client(request, clients_queryset)
+                if selected_client is None:
+                    messages.error(request, "Клиент не найден или недоступен.")
+                else:
+                    try:
+                        dispatch_result = self.send_owner_inbox_reply(
+                            request,
+                            client=selected_client,
+                            channel=form.cleaned_data["channel"],
+                            text=form.cleaned_data["text"].strip(),
+                        )
+                    except ValidationError as exc:
+                        messages.error(request, "; ".join(exc.messages))
+                    else:
+                        status = dispatch_result.get("status", OutboundMessage.Status.QUEUED)
+                        messages.success(request, f"Ответ отправлен. Статус: {status}.")
+                        return redirect(
+                            f"{reverse('admin:bookings_conversationmessage_inbox')}?client={selected_client.pk}"
+                        )
+            else:
+                messages.error(request, "Напишите текст ответа.")
+
+        selected_channel = get_client_channel(selected_client) if selected_client else "telegram"
+        if selected_channel == "unknown":
+            selected_channel = "telegram"
+        form = OwnerInboxReplyForm(
+            initial={
+                "client_id": selected_client.pk if selected_client else "",
+                "channel": selected_channel,
+            }
+        )
+        messages_queryset = ConversationMessage.objects.none()
+        latest_booking = None
+        conversation_mode = "bot"
+        if selected_client is not None:
+            messages_queryset = ConversationMessage.objects.filter(
+                client=selected_client,
+                business=selected_client.business,
+            ).order_by("created_at", "id")
+            latest_booking = (
+                Booking.objects.select_related("service", "master")
+                .filter(client=selected_client, business=selected_client.business)
+                .order_by("-start_time", "-id")
+                .first()
+            )
+            latest_manual_reply = AuditLog.objects.filter(
+                business=selected_client.business,
+                client=selected_client,
+                event_type="manual_reply_sent",
+            ).order_by("-created_at", "-id").first()
+            latest_handoff = AuditLog.objects.filter(
+                business=selected_client.business,
+                client=selected_client,
+                event_type="handoff_requested",
+            ).order_by("-created_at", "-id").first()
+            latest_user_message = messages_queryset.filter(
+                role=ConversationMessage.Role.USER,
+            ).order_by("-created_at", "-id").first()
+            if (
+                latest_manual_reply
+                and (
+                    latest_user_message is None
+                    or latest_manual_reply.created_at >= latest_user_message.created_at
+                )
+            ) or (
+                latest_handoff
+                and (
+                    latest_user_message is None
+                    or latest_handoff.created_at >= latest_user_message.created_at
+                )
+            ):
+                conversation_mode = "manual"
+
+        context = {
+            **self.admin_site.each_context(request),
+            "title": "Диалоги",
+            "opts": self.model._meta,
+            "dialogs": dialogs,
+            "selected_client": selected_client,
+            "selected_channel": selected_channel,
+            "conversation_messages": list(messages_queryset)[-120:],
+            "latest_booking": latest_booking,
+            "conversation_mode": conversation_mode,
+            "status_filter": status_filter,
+            "reply_form": form,
+            "inbox_url": reverse("admin:bookings_conversationmessage_inbox"),
+            "table_url": reverse("admin:bookings_conversationmessage_changelist"),
+        }
+        return TemplateResponse(
+            request,
+            "admin/bookings/conversationmessage/inbox.html",
+            context,
+        )
 
 
 @admin.register(InboundEvent)
@@ -425,6 +1841,16 @@ class InboundEventAdmin(TenantScopedAdminMixin, ModelAdmin):
     )
     list_filter = ("business", "channel", "status")
     search_fields = ("provider_event_id",)
+
+    def has_module_permission(self, request):
+        if is_business_owner_mode(request):
+            return False
+        return super().has_module_permission(request)
+
+    def has_view_permission(self, request, obj=None):
+        if is_business_owner_mode(request):
+            return False
+        return super().has_view_permission(request, obj=obj)
 
     @display(
         description="Статус",
@@ -483,6 +1909,23 @@ class OutboundMessageAdmin(TenantScopedAdminMixin, ModelAdmin):
         "created_at",
         "updated_at",
     )
+
+    def has_module_permission(self, request):
+        if is_business_owner_mode(request):
+            return False
+        return super().has_module_permission(request)
+
+    def has_view_permission(self, request, obj=None):
+        if is_business_owner_mode(request):
+            return False
+        return super().has_view_permission(request, obj=obj)
+
+    def has_add_permission(self, request):
+        if is_business_owner_mode(request):
+            return False
+        if request.user.is_superuser:
+            return True
+        return bool(self.get_admin_business_ids(request))
     fieldsets = (
         (
             "Сообщение",
@@ -528,6 +1971,108 @@ class OutboundMessageAdmin(TenantScopedAdminMixin, ModelAdmin):
             },
         ),
     )
+
+    def get_form(self, request, obj=None, **kwargs):
+        if obj is None:
+            kwargs["form"] = OutboundMessageReplyForm
+        return super().get_form(request, obj, **kwargs)
+
+    def has_add_permission(self, request):
+        if is_business_owner_mode(request):
+            return False
+        if request.user.is_superuser:
+            return True
+        return bool(self.get_admin_business_ids(request))
+
+    def get_fieldsets(self, request, obj=None):
+        if obj is None:
+            return (
+                (
+                    "Ответ клиенту",
+                    {
+                        "fields": (
+                            "client",
+                            "booking",
+                            "channel",
+                            "text",
+                        )
+                    },
+                ),
+            )
+        return super().get_fieldsets(request, obj)
+
+    def get_readonly_fields(self, request, obj=None):
+        if obj is None:
+            return ()
+        return super().get_readonly_fields(request, obj)
+
+    def get_changeform_initial_data(self, request):
+        initial = super().get_changeform_initial_data(request)
+        client_id = request.GET.get("client")
+        booking_id = request.GET.get("booking")
+        channel = request.GET.get("channel")
+        if client_id:
+            initial["client"] = client_id
+        if booking_id:
+            initial["booking"] = booking_id
+        if channel in {"telegram", "whatsapp"}:
+            initial["channel"] = channel
+        return initial
+
+    def save_model(self, request, obj, form, change):
+        if change:
+            return super().save_model(request, obj, form, change)
+
+        if obj.client_id is None:
+            raise ValidationError("Нужно выбрать клиента.")
+
+        if obj.booking_id and obj.booking.client_id != obj.client_id:
+            raise ValidationError("Запись должна принадлежать выбранному клиенту.")
+
+        obj.business_id = obj.client.business_id
+        if not obj.channel:
+            obj.channel = get_client_channel(obj.client)
+        if obj.channel == "unknown":
+            raise ValidationError(
+                "У клиента нет канала для ответа. Нужен Telegram, WhatsApp или телефон."
+            )
+        if obj.channel == "telegram" and not obj.client.telegram_id:
+            raise ValidationError("У клиента нет Telegram для ответа.")
+        if obj.channel == "whatsapp" and not (obj.client.whatsapp_id or obj.client.phone):
+            raise ValidationError("У клиента нет WhatsApp или телефона для ответа.")
+        obj.recipient = get_client_recipient(obj.client, obj.channel)
+        obj.message_type = "manual_reply"
+
+        super().save_model(request, obj, form, change)
+
+        ConversationMessage.objects.create(
+            business=obj.business,
+            client=obj.client,
+            channel=obj.channel,
+            role=ConversationMessage.Role.ASSISTANT,
+            content=obj.text,
+        )
+        create_audit_log(
+            business=obj.business,
+            client=obj.client,
+            booking=obj.booking,
+            outbound_message=obj,
+            actor_type="human",
+            event_type="manual_reply_sent",
+            channel=obj.channel,
+            payload={
+                "source": "admin",
+                "actor_id": request.user.id,
+                "actor_name": request.user.get_username(),
+            },
+        )
+        dispatch_result = dispatch_outbound_delivery(obj.id)
+        status = dispatch_result.get("status", OutboundMessage.Status.QUEUED)
+        self.message_user(
+            request,
+            f"Сообщение отправлено в очередь. Статус: {status}.",
+            level=messages.SUCCESS,
+        )
 
     @display(description="Статус", label=OUTBOUND_STATUS_LABELS)
     def colored_status(self, obj):
@@ -598,6 +2143,25 @@ class AuditLogAdmin(TenantScopedAdminMixin, ModelAdmin):
     list_filter = ("business", "event_type", "actor_type", "channel")
     search_fields = ("event_type", "client__phone", "booking__id")
 
+    def has_module_permission(self, request):
+        if is_business_owner_mode(request):
+            return False
+        return super().has_module_permission(request)
+
+    def has_view_permission(self, request, obj=None):
+        if is_business_owner_mode(request):
+            return False
+        return super().has_view_permission(request, obj=obj)
+
+    def get_queryset(self, request):
+        queryset = super().get_queryset(request)
+        has_explicit_event_filter = any(
+            key.startswith("event_type") for key in request.GET.keys()
+        )
+        if request.GET.get("show_technical") == "1" or has_explicit_event_filter:
+            return queryset
+        return queryset.exclude(event_type__in=TECHNICAL_AUDIT_EVENT_TYPES)
+
 
 @admin.register(AIInteractionLog)
 class AIInteractionLogAdmin(TenantScopedAdminMixin, ModelAdmin):
@@ -620,3 +2184,291 @@ class AIInteractionLogAdmin(TenantScopedAdminMixin, ModelAdmin):
     )
     def colored_status(self, obj):
         return obj.status
+
+
+def get_sidebar_navigation(request):
+    if not is_business_owner_mode(request):
+        return [
+            {
+                "title": "Записи",
+                "icon": "calendar_month",
+                "items": [
+                    {
+                        "title": "Бронирования",
+                        "icon": "event",
+                        "link": reverse("admin:bookings_booking_changelist"),
+                        "badge": "apps.bookings.admin.booking_needs_attention_count",
+                    },
+                    {
+                        "title": "Клиенты",
+                        "icon": "people",
+                        "link": reverse("admin:bookings_client_changelist"),
+                    },
+                ],
+            },
+            {
+                "title": "Коммуникации",
+                "icon": "chat",
+                "items": [
+                    {
+                        "title": "Исходящие сообщения",
+                        "icon": "send",
+                        "link": reverse("admin:bookings_outboundmessage_changelist"),
+                        "badge": "apps.bookings.admin.failed_messages_count",
+                    },
+                    {
+                        "title": "Входящие события",
+                        "icon": "inbox",
+                        "link": reverse("admin:bookings_inboundevent_changelist"),
+                    },
+                ],
+            },
+            {
+                "title": "Справочники",
+                "icon": "settings",
+                "items": [
+                    {
+                        "title": "Бизнесы",
+                        "icon": "store",
+                        "link": reverse("admin:bookings_business_changelist"),
+                    },
+                    {
+                        "title": "Мастера",
+                        "icon": "person",
+                        "link": reverse("admin:bookings_master_changelist"),
+                    },
+                    {
+                        "title": "Услуги",
+                        "icon": "spa",
+                        "link": reverse("admin:bookings_service_changelist"),
+                    },
+                    {
+                        "title": "Категории",
+                        "icon": "category",
+                        "link": reverse("admin:bookings_category_changelist"),
+                    },
+                ],
+            },
+            {
+                "title": "Система",
+                "icon": "admin_panel_settings",
+                "items": [
+                    {
+                        "title": "Аудит",
+                        "icon": "history",
+                        "link": reverse("admin:bookings_auditlog_changelist"),
+                    },
+                    {
+                        "title": "AI Логи",
+                        "icon": "psychology",
+                        "link": reverse("admin:bookings_aiinteractionlog_changelist"),
+                    },
+                    {
+                        "title": "Пользователи",
+                        "icon": "manage_accounts",
+                        "link": reverse("admin:auth_user_changelist"),
+                    },
+                ],
+            },
+        ]
+
+    return [
+        {
+            "title": "Управление",
+            "icon": "content_cut",
+            "items": [
+                {
+                    "title": "Записи",
+                    "icon": "event",
+                    "link": reverse("admin:bookings_booking_changelist"),
+                    "badge": "apps.bookings.admin.booking_needs_attention_count",
+                },
+                {
+                    "title": "Клиенты",
+                    "icon": "people",
+                    "link": reverse("admin:bookings_client_changelist"),
+                },
+                {
+                    "title": "Мастера",
+                    "icon": "person",
+                    "link": reverse("admin:bookings_master_changelist"),
+                },
+                {
+                    "title": "Услуги",
+                    "icon": "spa",
+                    "link": reverse("admin:bookings_service_changelist"),
+                },
+                {
+                    "title": "Категории",
+                    "icon": "category",
+                    "link": reverse("admin:bookings_category_changelist"),
+                },
+                {
+                    "title": "Настройки салона",
+                    "icon": "store",
+                    "link": _build_owner_business_link(request),
+                },
+            ],
+        },
+        {
+            "title": "Переписка",
+            "icon": "chat",
+            "items": [
+                {
+                    "title": "Диалоги",
+                    "icon": "forum",
+                    "link": reverse("admin:bookings_conversationmessage_inbox"),
+                },
+                {
+                    "title": "Сообщения клиентам",
+                    "icon": "send",
+                    "link": reverse("admin:bookings_outboundmessage_changelist"),
+                    "badge": "apps.bookings.admin.failed_messages_count",
+                },
+            ],
+        },
+    ]
+
+
+def get_sidebar_navigation(request):
+    if not is_business_owner_mode(request):
+        return [
+            {
+                "title": "Р—Р°РїРёСЃРё",
+                "icon": "calendar_month",
+                "items": [
+                    {
+                        "title": "Р‘СЂРѕРЅРёСЂРѕРІР°РЅРёСЏ",
+                        "icon": "event",
+                        "link": reverse("admin:bookings_booking_changelist"),
+                        "badge": "apps.bookings.admin.booking_needs_attention_count",
+                    },
+                    {
+                        "title": "РљР»РёРµРЅС‚С‹",
+                        "icon": "people",
+                        "link": reverse("admin:bookings_client_changelist"),
+                    },
+                ],
+            },
+            {
+                "title": "РљРѕРјРјСѓРЅРёРєР°С†РёРё",
+                "icon": "chat",
+                "items": [
+                    {
+                        "title": "РСЃС…РѕРґСЏС‰РёРµ СЃРѕРѕР±С‰РµРЅРёСЏ",
+                        "icon": "send",
+                        "link": reverse("admin:bookings_outboundmessage_changelist"),
+                        "badge": "apps.bookings.admin.failed_messages_count",
+                    },
+                    {
+                        "title": "Р’С…РѕРґСЏС‰РёРµ СЃРѕР±С‹С‚РёСЏ",
+                        "icon": "inbox",
+                        "link": reverse("admin:bookings_inboundevent_changelist"),
+                    },
+                ],
+            },
+            {
+                "title": "РЎРїСЂР°РІРѕС‡РЅРёРєРё",
+                "icon": "settings",
+                "items": [
+                    {
+                        "title": "Р‘РёР·РЅРµСЃС‹",
+                        "icon": "store",
+                        "link": reverse("admin:bookings_business_changelist"),
+                    },
+                    {
+                        "title": "РњР°СЃС‚РµСЂР°",
+                        "icon": "person",
+                        "link": reverse("admin:bookings_master_changelist"),
+                    },
+                    {
+                        "title": "РЈСЃР»СѓРіРё",
+                        "icon": "spa",
+                        "link": reverse("admin:bookings_service_changelist"),
+                    },
+                    {
+                        "title": "РљР°С‚РµРіРѕСЂРёРё",
+                        "icon": "category",
+                        "link": reverse("admin:bookings_category_changelist"),
+                    },
+                ],
+            },
+            {
+                "title": "РЎРёСЃС‚РµРјР°",
+                "icon": "admin_panel_settings",
+                "items": [
+                    {
+                        "title": "РђСѓРґРёС‚",
+                        "icon": "history",
+                        "link": reverse("admin:bookings_auditlog_changelist"),
+                    },
+                    {
+                        "title": "AI Р›РѕРіРё",
+                        "icon": "psychology",
+                        "link": reverse("admin:bookings_aiinteractionlog_changelist"),
+                    },
+                    {
+                        "title": "РџРѕР»СЊР·РѕРІР°С‚РµР»Рё",
+                        "icon": "manage_accounts",
+                        "link": reverse("admin:auth_user_changelist"),
+                    },
+                ],
+            },
+        ]
+
+    return [
+        {
+            "title": "РЈРїСЂР°РІР»РµРЅРёРµ",
+            "icon": "content_cut",
+            "items": [
+                {
+                    "title": "Р—Р°РїРёСЃРё",
+                    "icon": "event",
+                    "link": reverse("admin:bookings_booking_changelist"),
+                    "badge": "apps.bookings.admin.booking_needs_attention_count",
+                },
+                {
+                    "title": "РљР»РёРµРЅС‚С‹",
+                    "icon": "people",
+                    "link": reverse("admin:bookings_client_changelist"),
+                },
+                {
+                    "title": "РњР°СЃС‚РµСЂР°",
+                    "icon": "person",
+                    "link": reverse("admin:bookings_master_changelist"),
+                },
+                {
+                    "title": "РЈСЃР»СѓРіРё",
+                    "icon": "spa",
+                    "link": reverse("admin:bookings_service_changelist"),
+                },
+                {
+                    "title": "РљР°С‚РµРіРѕСЂРёРё",
+                    "icon": "category",
+                    "link": reverse("admin:bookings_category_changelist"),
+                },
+                {
+                    "title": "РќР°СЃС‚СЂРѕР№РєРё СЃР°Р»РѕРЅР°",
+                    "icon": "store",
+                    "link": _build_owner_business_link(request),
+                },
+            ],
+        },
+        {
+            "title": "РџРµСЂРµРїРёСЃРєР°",
+            "icon": "chat",
+            "items": [
+                {
+                    "title": "Диалоги",
+                    "icon": "forum",
+                    "link": reverse("admin:bookings_conversationmessage_inbox"),
+                },
+                {
+                    "title": "РЎРѕРѕР±С‰РµРЅРёСЏ РєР»РёРµРЅС‚Р°Рј",
+                    "icon": "send",
+                    "link": reverse("admin:bookings_outboundmessage_changelist"),
+                    "badge": "apps.bookings.admin.failed_messages_count",
+                },
+            ],
+        },
+    ]

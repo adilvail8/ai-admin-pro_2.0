@@ -1,0 +1,502 @@
+{% extends "admin/base.html" %}
+
+{% block extrastyle %}
+{{ block.super }}
+<style>
+    .owner-inbox-shell {
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+        min-height: calc(100vh - 150px);
+    }
+
+    .owner-inbox-topbar {
+        align-items: flex-end;
+        background:
+            radial-gradient(circle at 86% 18%, rgba(20, 184, 166, .22), transparent 35%),
+            linear-gradient(135deg, #0f172a, #172033 52%, #0f3f3a);
+        border: 1px solid rgba(148, 163, 184, .18);
+        border-radius: 22px;
+        color: #f8fafc;
+        display: flex;
+        justify-content: space-between;
+        padding: 24px;
+    }
+
+    .owner-inbox-topbar h1 {
+        font-size: clamp(26px, 3vw, 38px);
+        font-weight: 800;
+        line-height: 1.05;
+        margin: 0;
+    }
+
+    .owner-inbox-topbar span {
+        color: rgba(226, 232, 240, .78);
+        display: block;
+        font-size: 14px;
+        margin-top: 8px;
+    }
+
+    .owner-inbox-ghost-link {
+        align-items: center;
+        border: 1px solid rgba(255, 255, 255, .22);
+        border-radius: 999px;
+        color: #e0f2fe;
+        display: inline-flex;
+        font-size: 13px;
+        font-weight: 800;
+        min-height: 40px;
+        padding: 0 16px;
+        text-decoration: none;
+    }
+
+    .owner-inbox-filters {
+        display: flex;
+        gap: 8px;
+        padding: 0 18px 14px;
+    }
+
+    .owner-inbox-filter {
+        border: 1px solid #334155;
+        border-radius: 999px;
+        color: #94a3b8;
+        font-size: 12px;
+        font-weight: 800;
+        padding: 7px 10px;
+        text-decoration: none;
+    }
+
+    .owner-inbox-filter.is-active {
+        background: rgba(20, 184, 166, .18);
+        border-color: rgba(45, 212, 191, .45);
+        color: #67e8f9;
+    }
+
+    .owner-inbox-layout {
+        background: #0f172a;
+        border: 1px solid #243044;
+        border-radius: 24px;
+        display: grid;
+        grid-template-columns: 370px minmax(0, 1fr);
+        min-height: calc(100vh - 300px);
+        overflow: hidden;
+    }
+
+    .owner-inbox-sidebar {
+        background: #111827;
+        border-right: 1px solid #243044;
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+    }
+
+    .owner-inbox-sidebar-head {
+        align-items: center;
+        display: flex;
+        justify-content: space-between;
+        padding: 18px;
+    }
+
+    .owner-inbox-sidebar-head strong {
+        color: #f8fafc;
+        font-size: 15px;
+    }
+
+    .owner-inbox-sidebar-head span {
+        background: rgba(20, 184, 166, .18);
+        border-radius: 999px;
+        color: #67e8f9;
+        font-size: 12px;
+        font-weight: 900;
+        padding: 5px 9px;
+    }
+
+    .owner-inbox-dialogs {
+        display: flex;
+        flex-direction: column;
+        overflow: auto;
+    }
+
+    .owner-inbox-dialog {
+        align-items: center;
+        border-top: 1px solid #1f2937;
+        color: #f8fafc;
+        display: grid;
+        gap: 12px;
+        grid-template-columns: 44px minmax(0, 1fr) auto;
+        min-height: 78px;
+        padding: 13px 16px;
+        text-decoration: none;
+    }
+
+    .owner-inbox-dialog:hover,
+    .owner-inbox-dialog.is-active {
+        background: rgba(20, 184, 166, .13);
+    }
+
+    .owner-inbox-dialog.needs-attention {
+        border-left: 3px solid #f59e0b;
+    }
+
+    .owner-inbox-avatar {
+        align-items: center;
+        background: linear-gradient(135deg, #14b8a6, #2563eb);
+        border-radius: 16px;
+        color: #fff;
+        display: inline-flex;
+        font-weight: 900;
+        height: 44px;
+        justify-content: center;
+        width: 44px;
+    }
+
+    .owner-inbox-dialog-main,
+    .owner-inbox-dialog-main strong,
+    .owner-inbox-dialog-main small {
+        display: block;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .owner-inbox-dialog-main strong {
+        font-size: 14px;
+        font-weight: 800;
+    }
+
+    .owner-inbox-dialog-main small,
+    .owner-inbox-dialog-meta {
+        color: #94a3b8;
+        font-size: 12px;
+    }
+
+    .owner-inbox-dialog-meta {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        text-align: right;
+    }
+
+    .owner-inbox-dialog-meta em {
+        color: #5eead4;
+        font-style: normal;
+        font-weight: 800;
+    }
+
+    .owner-inbox-attention {
+        background: rgba(245, 158, 11, .14);
+        border-radius: 999px;
+        color: #fbbf24;
+        display: inline-flex;
+        font-size: 11px;
+        font-weight: 900;
+        padding: 4px 7px;
+    }
+
+    .owner-inbox-chat {
+        background:
+            radial-gradient(circle at 15% 12%, rgba(20, 184, 166, .12), transparent 28%),
+            linear-gradient(180deg, #111827, #0f172a);
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+    }
+
+    .owner-inbox-chat-head {
+        align-items: center;
+        background: rgba(15, 23, 42, .82);
+        border-bottom: 1px solid #243044;
+        display: flex;
+        justify-content: space-between;
+        padding: 18px 22px;
+    }
+
+    .owner-inbox-chat-head h2 {
+        color: #f8fafc;
+        font-size: 22px;
+        font-weight: 850;
+        margin: 0;
+    }
+
+    .owner-inbox-chat-head span {
+        color: #94a3b8;
+        font-size: 13px;
+    }
+
+    .owner-inbox-mode {
+        align-items: center;
+        background: rgba(15, 23, 42, .72);
+        border: 1px solid #334155;
+        border-radius: 999px;
+        color: #cbd5e1;
+        display: inline-flex;
+        font-size: 12px;
+        font-weight: 850;
+        gap: 6px;
+        margin-top: 10px;
+        padding: 6px 10px;
+    }
+
+    .owner-inbox-booking-pill {
+        background: rgba(2, 6, 23, .78);
+        border: 1px solid #334155;
+        border-radius: 18px;
+        color: #f8fafc;
+        min-width: 230px;
+        padding: 12px 14px;
+    }
+
+    .owner-inbox-booking-pill small,
+    .owner-inbox-booking-pill span {
+        color: #94a3b8;
+        display: block;
+        font-size: 12px;
+    }
+
+    .owner-inbox-booking-pill strong {
+        display: block;
+        font-size: 14px;
+        margin: 2px 0;
+    }
+
+    .owner-inbox-thread {
+        display: flex;
+        flex: 1;
+        flex-direction: column;
+        gap: 10px;
+        overflow: auto;
+        padding: 24px;
+    }
+
+    .owner-inbox-bubble {
+        display: flex;
+    }
+
+    .owner-inbox-bubble-assistant,
+    .owner-inbox-bubble-tool,
+    .owner-inbox-bubble-system {
+        justify-content: flex-end;
+    }
+
+    .owner-inbox-bubble-card {
+        background: #182235;
+        border: 1px solid #243044;
+        border-radius: 20px 20px 20px 7px;
+        box-shadow: 0 16px 34px rgba(0, 0, 0, .18);
+        color: #f8fafc;
+        max-width: min(720px, 78%);
+        padding: 12px 14px 9px;
+    }
+
+    .owner-inbox-bubble-assistant .owner-inbox-bubble-card,
+    .owner-inbox-bubble-tool .owner-inbox-bubble-card,
+    .owner-inbox-bubble-system .owner-inbox-bubble-card {
+        background: #064e3b;
+        border-color: #047857;
+        border-radius: 20px 20px 7px 20px;
+    }
+
+    .owner-inbox-bubble-card p {
+        font-size: 14px;
+        line-height: 1.5;
+        margin: 0;
+    }
+
+    .owner-inbox-bubble-card time {
+        color: #94a3b8;
+        display: block;
+        font-size: 11px;
+        margin-top: 7px;
+        text-align: right;
+    }
+
+    .owner-inbox-reply {
+        align-items: flex-end;
+        background: rgba(15, 23, 42, .94);
+        border-top: 1px solid #243044;
+        display: grid;
+        gap: 12px;
+        grid-template-columns: minmax(0, 1fr) auto;
+        padding: 16px 18px;
+    }
+
+    .owner-inbox-reply-textarea {
+        background: #111827;
+        border: 1px solid #334155;
+        border-radius: 18px;
+        color: #f8fafc;
+        min-height: 58px;
+        padding: 13px 14px;
+        resize: vertical;
+        width: 100%;
+    }
+
+    .owner-inbox-reply button {
+        align-items: center;
+        background: linear-gradient(135deg, #14b8a6, #2563eb);
+        border: 0;
+        border-radius: 16px;
+        color: #fff;
+        display: inline-flex;
+        font-weight: 900;
+        gap: 8px;
+        min-height: 50px;
+        padding: 0 18px;
+    }
+
+    .owner-inbox-empty,
+    .owner-inbox-no-client {
+        color: #94a3b8;
+        padding: 22px;
+    }
+
+    .owner-inbox-no-client {
+        align-items: center;
+        display: flex;
+        flex: 1;
+        flex-direction: column;
+        justify-content: center;
+        text-align: center;
+    }
+
+    @media (max-width: 1180px) {
+        .owner-inbox-layout {
+            grid-template-columns: 310px minmax(0, 1fr);
+        }
+    }
+
+    @media (max-width: 760px) {
+        .owner-inbox-topbar,
+        .owner-inbox-chat-head {
+            align-items: flex-start;
+            flex-direction: column;
+            gap: 14px;
+        }
+
+        .owner-inbox-layout {
+            grid-template-columns: 1fr;
+        }
+
+        .owner-inbox-sidebar {
+            max-height: 320px;
+        }
+
+        .owner-inbox-reply {
+            grid-template-columns: 1fr;
+        }
+
+        .owner-inbox-bubble-card {
+            max-width: 92%;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<section class="owner-inbox-shell">
+    <div class="owner-inbox-topbar">
+        <div>
+            <p class="owner-kicker">Переписка</p>
+            <h1>Диалоги с клиентами</h1>
+            <span>Сообщения сгруппированы по клиентам. Ответ уходит от имени бота.</span>
+        </div>
+        <a class="owner-inbox-ghost-link" href="{{ inbox_url }}">Обновить</a>
+    </div>
+
+    <div class="owner-inbox-layout">
+        <aside class="owner-inbox-sidebar">
+            <div class="owner-inbox-sidebar-head">
+                <strong>Клиенты</strong>
+                <span>{{ dialogs|length }}</span>
+            </div>
+            <nav class="owner-inbox-filters">
+                <a class="owner-inbox-filter{% if status_filter == 'all' %} is-active{% endif %}" href="{{ inbox_url }}?status=all">Все</a>
+                <a class="owner-inbox-filter{% if status_filter == 'active' %} is-active{% endif %}" href="{{ inbox_url }}?status=active">Активные</a>
+                <a class="owner-inbox-filter{% if status_filter == 'attention' %} is-active{% endif %}" href="{{ inbox_url }}?status=attention">Требуют внимания</a>
+            </nav>
+            <div class="owner-inbox-dialogs">
+                {% for dialog in dialogs %}
+                    <a class="owner-inbox-dialog{% if selected_client and dialog.client.pk == selected_client.pk %} is-active{% endif %}{% if dialog.needs_attention %} needs-attention{% endif %}" href="{{ inbox_url }}?client={{ dialog.client.pk }}&status={{ status_filter }}">
+                        <span class="owner-inbox-avatar">{{ dialog.client.name|default:"?"|first|upper }}</span>
+                        <span class="owner-inbox-dialog-main">
+                            <strong>{{ dialog.client.name|default:"Без имени" }}</strong>
+                            <small>{{ dialog.last_message.content|default:"Нет сообщений"|truncatechars:74 }}</small>
+                        </span>
+                        <span class="owner-inbox-dialog-meta">
+                            <em>{{ dialog.channel|default:"-" }}</em>
+                            {% if dialog.last_message_at %}<small>{{ dialog.last_message_at|date:"H:i" }}</small>{% endif %}
+                            {% if dialog.is_stale %}
+                                <strong class="owner-inbox-attention">нет ответа 2ч+</strong>
+                            {% elif dialog.needs_attention %}
+                                <strong class="owner-inbox-attention">ждет ответа</strong>
+                            {% endif %}
+                        </span>
+                    </a>
+                {% empty %}
+                    <p class="owner-inbox-empty">Диалогов пока нет.</p>
+                {% endfor %}
+            </div>
+        </aside>
+
+        <main class="owner-inbox-chat">
+            {% if selected_client %}
+                <header class="owner-inbox-chat-head">
+                    <div>
+                        <p class="owner-kicker">{{ selected_channel|upper }}</p>
+                        <h2>{{ selected_client.name|default:"Клиент" }}</h2>
+                        <span>
+                            {% if selected_client.phone %}{{ selected_client.phone }}{% endif %}
+                            {% if selected_client.telegram_id %}{% if selected_client.phone %} · {% endif %}{{ selected_client.telegram_id }}{% endif %}
+                        </span>
+                        <div class="owner-inbox-mode">
+                            {% if conversation_mode == "manual" %}
+                                👤 Ручной режим
+                            {% else %}
+                                🤖 Бот отвечает
+                            {% endif %}
+                        </div>
+                    </div>
+                    {% if latest_booking %}
+                        <div class="owner-inbox-booking-pill">
+                            <small>Последняя запись</small>
+                            <strong>{{ latest_booking.service.name }}</strong>
+                            <span>{{ latest_booking.start_time|date:"d.m H:i" }} · {{ latest_booking.status }}</span>
+                        </div>
+                    {% endif %}
+                </header>
+
+                <div class="owner-inbox-thread">
+                    {% for message in conversation_messages %}
+                        <article class="owner-inbox-bubble owner-inbox-bubble-{{ message.role }}">
+                            <div class="owner-inbox-bubble-card">
+                                <p>{{ message.content|linebreaksbr }}</p>
+                                <time>{{ message.created_at|date:"d.m H:i" }}</time>
+                            </div>
+                        </article>
+                    {% empty %}
+                        <p class="owner-inbox-empty">История сообщений пуста.</p>
+                    {% endfor %}
+                </div>
+
+                <form class="owner-inbox-reply" method="post" action="{{ inbox_url }}?client={{ selected_client.pk }}">
+                    {% csrf_token %}
+                    {{ reply_form.client_id }}
+                    {{ reply_form.channel }}
+                    {{ reply_form.text }}
+                    <button type="submit">
+                        <span class="material-symbols-outlined">send</span>
+                        Отправить
+                    </button>
+                </form>
+            {% else %}
+                <div class="owner-inbox-no-client">
+                    <span class="material-symbols-outlined">forum</span>
+                    <h2>Выберите диалог</h2>
+                    <p>Когда появятся входящие сообщения, здесь будет история клиента и быстрый ответ.</p>
+                </div>
+            {% endif %}
+        </main>
+    </div>
+</section>
+{% endblock %}

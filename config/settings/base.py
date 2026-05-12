@@ -234,6 +234,11 @@ UNFOLD = {
     },
     "DASHBOARD_CALLBACK": "apps.bookings.admin.dashboard_callback",
 }
+UNFOLD["SITE_TITLE"] = "apps.bookings.admin.canonical_site_title_callback"
+UNFOLD["SITE_HEADER"] = "apps.bookings.admin.site_header_callback"
+UNFOLD["SITE_SUBHEADER"] = "apps.bookings.admin.canonical_site_subheader_callback"
+UNFOLD["SIDEBAR"]["navigation"] = "apps.bookings.admin.canonical_sidebar_navigation"
+UNFOLD["STYLES"] = ["apps.bookings.admin.owner_admin_styles"]
 
 CELERY_BROKER_URL = env(
     "CELERY_BROKER_URL",

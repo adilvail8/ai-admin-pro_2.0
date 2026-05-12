@@ -79,6 +79,7 @@ def validate_business_booking_rules(*, business, master, service):
         if str(item).isdigit()
     }
     blocked_pairs = ai_rules.get("blocked_master_service_pairs", [])
+    allowed_pairs = ai_rules.get("allowed_master_service_pairs", [])
 
     if service.id in blocked_service_ids:
         raise ValidationError("This service is blocked by business rules.")
@@ -94,6 +95,16 @@ def validate_business_booking_rules(*, business, master, service):
             raise ValidationError(
                 "This master cannot be booked for the selected service."
             )
+
+    normalized_allowed_pairs = {
+        (pair.get("master_id"), pair.get("service_id"))
+        for pair in allowed_pairs
+        if isinstance(pair, dict)
+    }
+    if normalized_allowed_pairs and (master.id, service.id) not in normalized_allowed_pairs:
+        raise ValidationError(
+            "This master cannot be booked for the selected service."
+        )
 
 
 def iter_master_slots(

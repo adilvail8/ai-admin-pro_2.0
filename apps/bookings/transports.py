@@ -207,6 +207,44 @@ class TelegramTransport(HTTPTransportBase):
 class InternalAlertTransport(HTTPTransportBase):
     channel = "internal"
 
+    def send_text(
+        self,
+        *,
+        recipient: str,
+        text: str,
+        metadata: dict | None = None,
+    ) -> SendResult:
+        if settings.INTERNAL_ALERT_WEBHOOK_URL:
+            return super().send_text(
+                recipient=recipient,
+                text=text,
+                metadata=metadata,
+            )
+
+        if settings.HUMAN_ESCALATION_CHAT_ID and settings.TELEGRAM_BOT_TOKEN:
+            telegram_result = TelegramTransport().send_text(
+                recipient=settings.HUMAN_ESCALATION_CHAT_ID,
+                text=text,
+                metadata=metadata,
+            )
+            raw_response = {
+                **(telegram_result.raw_response or {}),
+                "internal_transport": "telegram_fallback",
+                "fallback_recipient": settings.HUMAN_ESCALATION_CHAT_ID,
+            }
+            return SendResult(
+                accepted=telegram_result.accepted,
+                delivered=telegram_result.delivered,
+                provider_message_id=telegram_result.provider_message_id,
+                raw_response=raw_response,
+                error_code=telegram_result.error_code,
+                error_message=telegram_result.error_message,
+            )
+
+        raise ValueError(
+            "INTERNAL_ALERT_WEBHOOK_URL is not configured and Telegram escalation fallback is unavailable."
+        )
+
     def build_request(self, *, recipient: str, text: str, metadata: dict | None):
         if not settings.INTERNAL_ALERT_WEBHOOK_URL:
             raise ValueError("INTERNAL_ALERT_WEBHOOK_URL is not configured.")
