@@ -736,6 +736,85 @@ class ConversationMessage(TimeStampedModel):
             ).delete()
 
 
+class ConversationThread(TimeStampedModel):
+    class Mode(models.TextChoices):
+        BOT_ACTIVE = "bot_active", _("Bot active")
+        HUMAN_TAKEOVER = "human_takeover", _("Human takeover")
+        BOT_PAUSED_UNTIL = "bot_paused_until", _("Bot paused until")
+
+    business = models.ForeignKey(
+        Business,
+        on_delete=models.CASCADE,
+        related_name="conversation_threads",
+    )
+    client = models.ForeignKey(
+        Client,
+        on_delete=models.CASCADE,
+        related_name="conversation_threads",
+    )
+    channel = models.CharField(
+        max_length=20,
+        choices=ConversationMessage.Channel.choices,
+    )
+    mode = models.CharField(
+        max_length=32,
+        choices=Mode.choices,
+        default=Mode.BOT_ACTIVE,
+    )
+    bot_paused_until = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ("business_id", "client_id", "channel")
+        verbose_name = _("conversation thread")
+        verbose_name_plural = _("conversation threads")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("business", "client", "channel"),
+                name="uniq_conversation_thread_per_client_channel",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=("business", "client", "channel", "mode"),
+                name="bookings_thread_mode_idx",
+            ),
+            models.Index(
+                fields=("bot_paused_until",),
+                name="bookings_thread_paused_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.business_id}:{self.client_id}:{self.channel}"
+            f" [{self.mode}]"
+        )
+
+    def clean(self):
+        super().clean()
+        if self.client_id and self.business_id != self.client.business_id:
+            raise ValidationError(
+                {"client": _("Client must belong to the same business.")}
+            )
+        if self.mode != self.Mode.BOT_PAUSED_UNTIL and self.bot_paused_until:
+            raise ValidationError(
+                {
+                    "bot_paused_until": _(
+                        "Paused-until timestamp is only valid for paused mode."
+                    )
+                }
+            )
+        if self.mode == self.Mode.BOT_PAUSED_UNTIL and not self.bot_paused_until:
+            raise ValidationError(
+                {"bot_paused_until": _("Paused mode requires a timestamp.")}
+            )
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
+
 class BookingSession(TimeStampedModel):
     SESSION_TTL = timedelta(minutes=60)
 

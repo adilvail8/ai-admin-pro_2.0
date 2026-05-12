@@ -11,6 +11,7 @@ from django.utils import timezone
 
 from .ai_manager import AIManager, AI_RETRY_MESSAGE, HUMAN_HANDOFF_MESSAGE, VOICE_FALLBACK_MESSAGE
 from .client_identity import ClientIdentityResolver
+from .conversation_threads import get_or_create_conversation_thread, is_bot_active
 from .normalizers import normalize_telegram_event
 from .models import Booking, BookingSession, Business, Client, ConversationMessage, InboundEvent, Master
 from .session_state import (
@@ -2312,6 +2313,15 @@ def process_incoming_message(
             role=ConversationMessage.Role.USER,
             content=normalized_text,
         )
+
+    thread = get_or_create_conversation_thread(
+        business=business,
+        client=client,
+        channel=channel,
+    )
+    if not is_bot_active(thread):
+        return {"reply": "", "escalated": False, "bot_paused": True}
+
 
     preferred_language = detect_client_language(
         ai_manager=ai_manager,

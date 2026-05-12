@@ -10,11 +10,14 @@
 {% block content %}
     {% if owner_dashboard %}
         <section class="owner-dashboard">
-            <div class="owner-hero">
+            <div class="owner-dashboard-head">
                 <div>
                     <p class="owner-kicker">Кабинет салона</p>
                     <h1>{{ owner_dashboard.business.display_brand_name|default:site_header }}</h1>
-                    <p>{{ owner_dashboard.business.city|default:"" }}{% if owner_dashboard.business.working_hours %} · {{ owner_dashboard.business.working_hours }}{% endif %}</p>
+                    <p>
+                        {{ owner_dashboard.business.city|default:"" }}
+                        {% if owner_dashboard.business.working_hours %} · {{ owner_dashboard.business.working_hours }}{% endif %}
+                    </p>
                 </div>
                 <div class="owner-actions">
                     {% for action in owner_dashboard.quick_actions %}
@@ -26,63 +29,36 @@
                 </div>
             </div>
 
-            <div class="owner-kpi-grid">
+            <div class="owner-dashboard-stats">
                 {% for card in owner_dashboard.cards %}
-                    <a href="{{ card.href }}" class="owner-kpi owner-kpi-{{ card.tone }}">
+                    <a href="{{ card.href }}" class="stat-card stat-card--{{ card.tone }}{% if card.value %} stat-card--active{% endif %}">
                         <span class="material-symbols-outlined">{{ card.icon }}</span>
-                        <strong>{{ card.value }}</strong>
-                        <small>{{ card.label }}</small>
+                        <span class="stat-number">{{ card.value }}</span>
+                        <span class="stat-label">{{ card.label }}</span>
                     </a>
                 {% endfor %}
             </div>
 
-            <div class="owner-panels">
-                <section class="owner-panel">
-                    <div class="owner-panel-heading">
-                        <h2>Ближайшие записи</h2>
-                        <a href="{% url 'admin:bookings_booking_changelist' %}">Все записи</a>
+            <section class="owner-dashboard-upcoming">
+                <div class="owner-panel-heading">
+                    <h2>Ближайшие записи</h2>
+                    <a href="{% url 'admin:bookings_booking_changelist' %}">Все записи</a>
+                </div>
+                {% if owner_dashboard.upcoming_bookings %}
+                    <div class="owner-upcoming-list">
+                        {% for booking in owner_dashboard.upcoming_bookings %}
+                            <a class="upcoming-row" href="{% url 'admin:bookings_booking_change' booking.pk %}">
+                                <span class="upcoming-time">{{ booking.start_time|date:"d.m H:i" }}</span>
+                                <span class="upcoming-client">{{ booking.client }}</span>
+                                <span class="upcoming-service">{{ booking.service.name }}</span>
+                                <span class="upcoming-master">{{ booking.master.full_name }}</span>
+                            </a>
+                        {% endfor %}
                     </div>
-                    {% if owner_dashboard.upcoming_bookings %}
-                        <div class="owner-list">
-                            {% for booking in owner_dashboard.upcoming_bookings %}
-                                <a class="owner-list-row" href="{% url 'admin:bookings_booking_change' booking.pk %}">
-                                    <span class="owner-row-time">{{ booking.start_time|date:"d.m H:i" }}</span>
-                                    <span>
-                                        <strong>{{ booking.service.name }}</strong>
-                                        <small>{{ booking.client }} · {{ booking.master.full_name }}</small>
-                                    </span>
-                                    <em>{{ booking.status }}</em>
-                                </a>
-                            {% endfor %}
-                        </div>
-                    {% else %}
-                        <p class="owner-empty">Пока нет ближайших записей.</p>
-                    {% endif %}
-                </section>
-
-                <section class="owner-panel">
-                    <div class="owner-panel-heading">
-                        <h2>Последние сообщения</h2>
-                        <a href="{% url 'admin:bookings_conversationmessage_inbox' %}">Открыть диалоги</a>
-                    </div>
-                    {% if owner_dashboard.recent_messages %}
-                        <div class="owner-list">
-                            {% for message in owner_dashboard.recent_messages %}
-                                <a class="owner-list-row" href="{% url 'admin:bookings_conversationmessage_inbox' %}?client={{ message.client_id }}">
-                                    <span class="owner-row-role">{{ message.role }}</span>
-                                    <span>
-                                        <strong>{{ message.client }}</strong>
-                                        <small>{{ message.content|truncatechars:88 }}</small>
-                                    </span>
-                                    <em>{{ message.created_at|date:"H:i" }}</em>
-                                </a>
-                            {% endfor %}
-                        </div>
-                    {% else %}
-                        <p class="owner-empty">Новых сообщений пока нет.</p>
-                    {% endif %}
-                </section>
-            </div>
+                {% else %}
+                    <p class="owner-empty">Записей нет</p>
+                {% endif %}
+            </section>
         </section>
     {% else %}
         <div class="flex flex-col lg:flex-row lg:gap-8">
