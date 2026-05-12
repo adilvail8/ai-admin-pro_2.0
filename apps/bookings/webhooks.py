@@ -2289,7 +2289,7 @@ def process_incoming_message(
     )
 
     if process_opt_out(client=client, text=normalized_text):
-        reply = "Хорошо, больше не буду присылать напоминания по этой записи."
+        reply = get_localized_runtime_message("opt_out", preferred_language)
         store_message(
             business_id=business_id,
             client=client,
