@@ -663,6 +663,29 @@
     font-size: 13px;
 }
 
+.owner-inbox-channel-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 10px;
+}
+
+.owner-inbox-channel-tabs a {
+    border: 1px solid #dbe5ef;
+    border-radius: 999px;
+    color: #64748b;
+    font-size: 11px;
+    font-weight: 850;
+    padding: 5px 9px;
+    text-decoration: none;
+}
+
+.owner-inbox-channel-tabs a.is-active {
+    background: rgba(20, 184, 166, .16);
+    border-color: rgba(13, 148, 136, .45);
+    color: #0f766e;
+}
+
 .owner-inbox-mode {
     align-items: center;
     background: #eef2f7;
@@ -675,6 +698,38 @@
     gap: 6px;
     margin-top: 10px;
     padding: 6px 10px;
+}
+
+.owner-thread-mode-form {
+    align-items: center;
+    background: #f8fafc;
+    border: 1px solid #dbe5ef;
+    border-radius: 999px;
+    display: inline-flex;
+    gap: 4px;
+    margin-top: 8px;
+    padding: 4px;
+}
+
+.owner-thread-mode-form button {
+    background: transparent;
+    border: 0;
+    border-radius: 999px;
+    color: #64748b;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 800;
+    min-height: 30px;
+    padding: 6px 10px;
+}
+
+.owner-thread-mode-form button:hover {
+    color: #0f766e;
+}
+
+.owner-thread-mode-form button.is-active {
+    background: #0f766e;
+    color: #fff;
 }
 
 .owner-inbox-booking-pill {
@@ -847,6 +902,17 @@
     color: #67e8f9;
 }
 
+.dark .owner-inbox-channel-tabs a {
+    border-color: #334155;
+    color: #94a3b8;
+}
+
+.dark .owner-inbox-channel-tabs a.is-active {
+    background: rgba(20, 184, 166, .18);
+    border-color: rgba(45, 212, 191, .45);
+    color: #67e8f9;
+}
+
 .dark .owner-inbox-attention {
     color: #fbbf24;
 }
@@ -855,6 +921,24 @@
     background: rgba(15, 23, 42, .72);
     border-color: #334155;
     color: #cbd5e1;
+}
+
+.dark .owner-thread-mode-form {
+    background: rgba(15, 23, 42, .72);
+    border-color: #334155;
+}
+
+.dark .owner-thread-mode-form button {
+    color: #94a3b8;
+}
+
+.dark .owner-thread-mode-form button:hover {
+    color: #67e8f9;
+}
+
+.dark .owner-thread-mode-form button.is-active {
+    background: #0f766e;
+    color: #f8fafc;
 }
 
 .dark .owner-inbox-sidebar-head strong,

@@ -5,6 +5,7 @@ from django.contrib import admin
 from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.db.models import Count, Max
+from django.http import HttpResponseBadRequest
 from django.shortcuts import redirect
 from django.template.response import TemplateResponse
 from django.urls import path, reverse
@@ -17,6 +18,11 @@ from unfold.decorators import display
 from apps.accounts.models import BusinessMembership
 
 from .audit import create_audit_log
+from .conversation_threads import (
+    get_or_create_conversation_thread,
+    pause_bot_for_human_reply,
+    set_thread_mode,
+)
 from .models import (
     AIInteractionLog,
     AuditLog,
@@ -25,6 +31,7 @@ from .models import (
     Category,
     Client,
     ConversationMessage,
+    ConversationThread,
     InboundEvent,
     Master,
     OutboundMessage,
@@ -1048,6 +1055,11 @@ class ConversationMessageAdmin(TenantScopedAdminMixin, ModelAdmin):
                 self.admin_site.admin_view(self.inbox_view),
                 name="bookings_conversationmessage_inbox",
             ),
+            path(
+                "inbox/set-thread-mode/",
+                self.admin_site.admin_view(self.set_thread_mode_view),
+                name="bookings_conversationmessage_set_thread_mode",
+            ),
             *super().get_urls(),
         ]
 
@@ -1069,6 +1081,25 @@ class ConversationMessageAdmin(TenantScopedAdminMixin, ModelAdmin):
             except (Client.DoesNotExist, ValueError):
                 return None
         return clients_queryset.order_by("-last_message_at", "name").first()
+
+    def get_selected_inbox_channel(self, request, *, selected_client=None, dialogs=None):
+        requested_channel = request.GET.get("channel") or request.POST.get("channel")
+        valid_channels = {choice[0] for choice in ConversationMessage.Channel.choices}
+        if requested_channel in valid_channels:
+            return requested_channel
+        if selected_client is not None and dialogs:
+            for dialog in dialogs:
+                if (
+                    dialog["client"].pk == selected_client.pk
+                    and dialog.get("channel") in valid_channels
+                ):
+                    return dialog["channel"]
+        selected_channel = (
+            get_client_channel(selected_client) if selected_client else "telegram"
+        )
+        if selected_channel not in valid_channels:
+            return ConversationMessage.Channel.TELEGRAM
+        return selected_channel
 
     def get_inbox_dialogs(self, clients_queryset, *, status_filter: str = "all"):
         dialogs = []
@@ -1115,7 +1146,7 @@ class ConversationMessageAdmin(TenantScopedAdminMixin, ModelAdmin):
                 {
                     "client": client,
                     "last_message": last_message,
-                    "channel": get_client_channel(client),
+                    "channel": last_message.channel if last_message else get_client_channel(client),
                     "message_count": client.message_count,
                     "last_message_at": client.last_message_at,
                     "needs_attention": needs_attention,
@@ -1123,6 +1154,38 @@ class ConversationMessageAdmin(TenantScopedAdminMixin, ModelAdmin):
                 }
             )
         return dialogs
+
+    def set_thread_mode_view(self, request):
+        if request.method != "POST":
+            return HttpResponseBadRequest("POST required.")
+
+        client_id = request.POST.get("client_id")
+        channel = request.POST.get("channel")
+        mode = request.POST.get("mode")
+        valid_channels = {choice[0] for choice in ConversationMessage.Channel.choices}
+        allowed_modes = {
+            ConversationThread.Mode.BOT_ACTIVE,
+            ConversationThread.Mode.HUMAN_TAKEOVER,
+        }
+        if channel not in valid_channels or mode not in allowed_modes:
+            return HttpResponseBadRequest("Invalid thread mode request.")
+
+        clients_queryset = self.get_inbox_client_queryset(request)
+        try:
+            selected_client = clients_queryset.get(pk=client_id)
+        except (Client.DoesNotExist, ValueError):
+            return HttpResponseBadRequest("Client not found.")
+
+        thread = get_or_create_conversation_thread(
+            business=selected_client.business,
+            client=selected_client,
+            channel=channel,
+        )
+        set_thread_mode(thread, mode)
+        return redirect(
+            f"{reverse('admin:bookings_conversationmessage_inbox')}"
+            f"?client={selected_client.pk}&channel={channel}"
+        )
 
     def send_owner_inbox_reply(self, request, *, client, channel: str, text: str):
         if channel == "unknown":
@@ -1147,6 +1210,12 @@ class ConversationMessageAdmin(TenantScopedAdminMixin, ModelAdmin):
             role=ConversationMessage.Role.ASSISTANT,
             content=text,
         )
+        thread = get_or_create_conversation_thread(
+            business=client.business,
+            client=client,
+            channel=channel,
+        )
+        pause_bot_for_human_reply(thread)
         create_audit_log(
             business=client.business,
             client=client,
@@ -1196,14 +1265,18 @@ class ConversationMessageAdmin(TenantScopedAdminMixin, ModelAdmin):
                         status = dispatch_result.get("status", OutboundMessage.Status.QUEUED)
                         messages.success(request, f"Ответ отправлен. Статус: {status}.")
                         return redirect(
-                            f"{reverse('admin:bookings_conversationmessage_inbox')}?client={selected_client.pk}"
+                            f"{reverse('admin:bookings_conversationmessage_inbox')}"
+                            f"?client={selected_client.pk}"
+                            f"&channel={form.cleaned_data['channel']}"
                         )
             else:
                 messages.error(request, "Напишите текст ответа.")
 
-        selected_channel = get_client_channel(selected_client) if selected_client else "telegram"
-        if selected_channel == "unknown":
-            selected_channel = "telegram"
+        selected_channel = self.get_selected_inbox_channel(
+            request,
+            selected_client=selected_client,
+            dialogs=dialogs,
+        )
         form = OwnerInboxReplyForm(
             initial={
                 "client_id": selected_client.pk if selected_client else "",
@@ -1212,11 +1285,27 @@ class ConversationMessageAdmin(TenantScopedAdminMixin, ModelAdmin):
         )
         messages_queryset = ConversationMessage.objects.none()
         latest_booking = None
-        conversation_mode = "bot"
+        conversation_thread = None
+        available_channels = []
         if selected_client is not None:
+            conversation_thread = get_or_create_conversation_thread(
+                business=selected_client.business,
+                client=selected_client,
+                channel=selected_channel,
+            )
+            available_channels = list(
+                ConversationMessage.objects.filter(
+                    business=selected_client.business,
+                    client=selected_client,
+                )
+                .order_by("channel")
+                .values_list("channel", flat=True)
+                .distinct()
+            )
             messages_queryset = ConversationMessage.objects.filter(
                 client=selected_client,
                 business=selected_client.business,
+                channel=selected_channel,
             ).order_by("created_at", "id")
             latest_booking = (
                 Booking.objects.select_related("service", "master")
@@ -1224,33 +1313,6 @@ class ConversationMessageAdmin(TenantScopedAdminMixin, ModelAdmin):
                 .order_by("-start_time", "-id")
                 .first()
             )
-            latest_manual_reply = AuditLog.objects.filter(
-                business=selected_client.business,
-                client=selected_client,
-                event_type="manual_reply_sent",
-            ).order_by("-created_at", "-id").first()
-            latest_handoff = AuditLog.objects.filter(
-                business=selected_client.business,
-                client=selected_client,
-                event_type="handoff_requested",
-            ).order_by("-created_at", "-id").first()
-            latest_user_message = messages_queryset.filter(
-                role=USER_ROLE,
-            ).order_by("-created_at", "-id").first()
-            if (
-                latest_manual_reply
-                and (
-                    latest_user_message is None
-                    or latest_manual_reply.created_at >= latest_user_message.created_at
-                )
-            ) or (
-                latest_handoff
-                and (
-                    latest_user_message is None
-                    or latest_handoff.created_at >= latest_user_message.created_at
-                )
-            ):
-                conversation_mode = "manual"
 
         context = {
             **self.admin_site.each_context(request),
@@ -1259,12 +1321,16 @@ class ConversationMessageAdmin(TenantScopedAdminMixin, ModelAdmin):
             "dialogs": dialogs,
             "selected_client": selected_client,
             "selected_channel": selected_channel,
+            "available_channels": available_channels,
             "conversation_messages": list(messages_queryset)[-120:],
             "latest_booking": latest_booking,
-            "conversation_mode": conversation_mode,
+            "conversation_thread": conversation_thread,
             "status_filter": status_filter,
             "reply_form": form,
             "inbox_url": reverse("admin:bookings_conversationmessage_inbox"),
+            "set_thread_mode_url": reverse(
+                "admin:bookings_conversationmessage_set_thread_mode"
+            ),
             "table_url": reverse("admin:bookings_conversationmessage_changelist"),
         }
         return TemplateResponse(

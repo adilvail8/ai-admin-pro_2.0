@@ -65,11 +65,18 @@ from apps.bookings.models import (
     Business,
     Category,
     Client,
+    ConversationThread,
     ConversationMessage,
     InboundEvent,
     Master,
     OutboundMessage,
     Service,
+)
+from apps.bookings.conversation_threads import (
+    get_or_create_conversation_thread,
+    is_bot_active,
+    pause_bot_for_human_reply,
+    set_thread_mode,
 )
 from apps.bookings.session_state import (
     get_or_create_booking_session,
@@ -5157,6 +5164,193 @@ def test_webhook_accepts_text_message(client, business, monkeypatch):
 
 @pytest.mark.django_db
 @override_settings(WEBHOOK_SHARED_SECRET="secret-token")
+def test_paused_thread_webhook_does_not_create_outbound_message(
+    client,
+    business,
+    client_profile,
+    monkeypatch,
+):
+    client_profile.whatsapp_id = "wa-paused"
+    client_profile.save(update_fields=["whatsapp_id", "updated_at"])
+    thread = get_or_create_conversation_thread(
+        business=business,
+        client=client_profile,
+        channel=ConversationMessage.Channel.WHATSAPP,
+    )
+    pause_bot_for_human_reply(thread)
+
+    monkeypatch.setattr(
+        "apps.bookings.ai_manager.AIManager.generate_reply",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("AI should not be called")
+        ),
+    )
+
+    response = client.post(
+        "/api/v1/webhooks/messenger/",
+        data=json.dumps(
+            {
+                "business_id": business.id,
+                "channel": "whatsapp",
+                "external_id": "wa-paused",
+                "phone": str(client_profile.phone),
+                "name": client_profile.name,
+                "text": "Какие услуги есть?",
+                "provider_event_id": "evt-paused-thread",
+            }
+        ),
+        content_type="application/json",
+        HTTP_X_WEBHOOK_TOKEN="secret-token",
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "reply": "",
+        "escalated": False,
+        "bot_paused": True,
+    }
+    assert ConversationMessage.objects.filter(
+        business=business,
+        client=client_profile,
+        channel=ConversationMessage.Channel.WHATSAPP,
+        role=ConversationMessage.Role.USER,
+        content="Какие услуги есть?",
+    ).exists()
+    assert not ConversationMessage.objects.filter(
+        business=business,
+        client=client_profile,
+        channel=ConversationMessage.Channel.WHATSAPP,
+        role=ConversationMessage.Role.ASSISTANT,
+    ).exists()
+    assert not OutboundMessage.objects.filter(
+        business=business,
+        client=client_profile,
+        channel=ConversationMessage.Channel.WHATSAPP,
+    ).exists()
+
+
+@pytest.mark.django_db
+@override_settings(WEBHOOK_SHARED_SECRET="secret-token")
+def test_paused_thread_is_isolated_per_channel(
+    client,
+    business,
+    client_profile,
+    monkeypatch,
+):
+    client_profile.telegram_id = "tg-isolated"
+    client_profile.whatsapp_id = "wa-isolated"
+    client_profile.save(update_fields=["telegram_id", "whatsapp_id", "updated_at"])
+    telegram_thread = get_or_create_conversation_thread(
+        business=business,
+        client=client_profile,
+        channel=ConversationMessage.Channel.TELEGRAM,
+    )
+    pause_bot_for_human_reply(telegram_thread)
+
+    monkeypatch.setattr(
+        "apps.bookings.ai_manager.AIManager.generate_reply",
+        lambda *args, **kwargs: "WhatsApp bot reply",
+    )
+    monkeypatch.setattr(
+        "apps.bookings.views.dispatch_outbound_delivery",
+        lambda outbound_message_id: {
+            "outbound_message_id": outbound_message_id,
+            "status": OutboundMessage.Status.QUEUED,
+        },
+    )
+
+    response = client.post(
+        "/api/v1/webhooks/messenger/",
+        data=json.dumps(
+            {
+                "business_id": business.id,
+                "channel": "whatsapp",
+                "external_id": "wa-isolated",
+                "phone": str(client_profile.phone),
+                "name": client_profile.name,
+                "text": "Нужна консультация.",
+                "provider_event_id": "evt-channel-isolation",
+            }
+        ),
+        content_type="application/json",
+        HTTP_X_WEBHOOK_TOKEN="secret-token",
+    )
+
+    assert response.status_code == 200
+    assert response.json()["reply"]
+    assert "bot_paused" not in response.json()
+    assert OutboundMessage.objects.filter(
+        business=business,
+        client=client_profile,
+        channel=ConversationMessage.Channel.WHATSAPP,
+    ).exists()
+    telegram_thread.refresh_from_db()
+    assert telegram_thread.mode == ConversationThread.Mode.BOT_PAUSED_UNTIL
+
+
+@pytest.mark.django_db
+@override_settings(WEBHOOK_SHARED_SECRET="secret-token")
+def test_human_takeover_thread_webhook_does_not_create_outbound_message(
+    client,
+    business,
+    client_profile,
+    monkeypatch,
+):
+    client_profile.whatsapp_id = "wa-human"
+    client_profile.save(update_fields=["whatsapp_id", "updated_at"])
+    thread = get_or_create_conversation_thread(
+        business=business,
+        client=client_profile,
+        channel=ConversationMessage.Channel.WHATSAPP,
+    )
+    set_thread_mode(thread, ConversationThread.Mode.HUMAN_TAKEOVER)
+
+    monkeypatch.setattr(
+        "apps.bookings.ai_manager.AIManager.generate_reply",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("AI should not be called")
+        ),
+    )
+
+    response = client.post(
+        "/api/v1/webhooks/messenger/",
+        data=json.dumps(
+            {
+                "business_id": business.id,
+                "channel": "whatsapp",
+                "external_id": "wa-human",
+                "phone": str(client_profile.phone),
+                "name": client_profile.name,
+                "text": "Админ ведет диалог?",
+                "provider_event_id": "evt-human-takeover-thread",
+            }
+        ),
+        content_type="application/json",
+        HTTP_X_WEBHOOK_TOKEN="secret-token",
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "reply": "",
+        "escalated": False,
+        "bot_paused": True,
+    }
+    assert ConversationMessage.objects.filter(
+        business=business,
+        client=client_profile,
+        channel=ConversationMessage.Channel.WHATSAPP,
+        role=ConversationMessage.Role.USER,
+        content="Админ ведет диалог?",
+    ).exists()
+    assert not OutboundMessage.objects.filter(
+        business=business,
+        client=client_profile,
+        channel=ConversationMessage.Channel.WHATSAPP,
+    ).exists()
+
+
+@pytest.mark.django_db
+@override_settings(WEBHOOK_SHARED_SECRET="secret-token")
 def test_webhook_deduplicates_inbound_event(client, business, monkeypatch):
     def fake_handle_text_message(**kwargs):
         return {"reply": "Здравствуйте!", "escalated": False}
@@ -6230,7 +6424,9 @@ def test_owner_inbox_can_send_reply(
 
     outbound = OutboundMessage.objects.get(message_type="manual_reply")
     assert response.status_code == 302
-    assert response["Location"].endswith(f"?client={client_profile.id}")
+    assert response["Location"].endswith(
+        f"?client={client_profile.id}&channel=telegram"
+    )
     assert outbound.business_id == business_membership.business_id
     assert outbound.client_id == client_profile.id
     assert outbound.recipient == "123456"
@@ -6243,6 +6439,180 @@ def test_owner_inbox_can_send_reply(
         role=ConversationMessage.Role.ASSISTANT,
         content="Да, 17:00 свободно.",
     ).exists()
+    thread = ConversationThread.objects.get(
+        business=business_membership.business,
+        client=client_profile,
+        channel=ConversationMessage.Channel.TELEGRAM,
+    )
+    assert thread.mode == ConversationThread.Mode.BOT_PAUSED_UNTIL
+    assert thread.bot_paused_until > timezone.now() + timedelta(minutes=29)
+    assert thread.bot_paused_until <= timezone.now() + timedelta(minutes=31)
+
+
+@pytest.mark.django_db
+def test_owner_inbox_uses_thread_context_and_filters_messages_by_channel(
+    client,
+    owner_user,
+    business_membership,
+    client_profile,
+):
+    owner_user.is_staff = True
+    owner_user.save(update_fields=["is_staff"])
+    client_profile.telegram_id = "123456"
+    client_profile.whatsapp_id = "wa-123"
+    client_profile.save(update_fields=["telegram_id", "whatsapp_id"])
+    ConversationMessage.objects.create(
+        business=business_membership.business,
+        client=client_profile,
+        channel=ConversationMessage.Channel.TELEGRAM,
+        role=ConversationMessage.Role.USER,
+        content="Telegram only message",
+    )
+    ConversationMessage.objects.create(
+        business=business_membership.business,
+        client=client_profile,
+        channel=ConversationMessage.Channel.WHATSAPP,
+        role=ConversationMessage.Role.USER,
+        content="WhatsApp only message",
+    )
+    thread = get_or_create_conversation_thread(
+        business=business_membership.business,
+        client=client_profile,
+        channel=ConversationMessage.Channel.TELEGRAM,
+    )
+    set_thread_mode(thread, ConversationThread.Mode.HUMAN_TAKEOVER)
+    client.force_login(owner_user)
+
+    response = client.get(
+        f"{reverse('admin:bookings_conversationmessage_inbox')}"
+        f"?client={client_profile.id}&channel=telegram"
+    )
+
+    assert response.status_code == 200
+    assert response.context["selected_channel"] == ConversationMessage.Channel.TELEGRAM
+    assert response.context["available_channels"] == [
+        ConversationMessage.Channel.TELEGRAM,
+        ConversationMessage.Channel.WHATSAPP,
+    ]
+    assert response.context["conversation_thread"].mode == (
+        ConversationThread.Mode.HUMAN_TAKEOVER
+    )
+    assert [message.content for message in response.context["conversation_messages"]] == [
+        "Telegram only message"
+    ]
+    content = response.content.decode()
+    assert "owner-inbox-channel-tabs" in content
+    assert "owner-thread-mode-form" in content
+    assert "Telegram only message" in content
+
+
+@pytest.mark.django_db
+def test_owner_inbox_set_thread_mode_to_human_takeover(
+    client,
+    owner_user,
+    business_membership,
+    client_profile,
+):
+    owner_user.is_staff = True
+    owner_user.save(update_fields=["is_staff"])
+    ConversationMessage.objects.create(
+        business=business_membership.business,
+        client=client_profile,
+        channel=ConversationMessage.Channel.TELEGRAM,
+        role=ConversationMessage.Role.USER,
+        content="Передайте админу.",
+    )
+    client.force_login(owner_user)
+
+    response = client.post(
+        reverse("admin:bookings_conversationmessage_set_thread_mode"),
+        data={
+            "client_id": client_profile.id,
+            "channel": ConversationMessage.Channel.TELEGRAM,
+            "mode": ConversationThread.Mode.HUMAN_TAKEOVER,
+        },
+    )
+
+    thread = ConversationThread.objects.get(
+        business=business_membership.business,
+        client=client_profile,
+        channel=ConversationMessage.Channel.TELEGRAM,
+    )
+    assert response.status_code == 302
+    assert response["Location"].endswith(
+        f"?client={client_profile.id}&channel=telegram"
+    )
+    assert thread.mode == ConversationThread.Mode.HUMAN_TAKEOVER
+
+
+@pytest.mark.django_db
+def test_owner_inbox_set_thread_mode_to_bot_active(
+    client,
+    owner_user,
+    business_membership,
+    client_profile,
+):
+    owner_user.is_staff = True
+    owner_user.save(update_fields=["is_staff"])
+    ConversationMessage.objects.create(
+        business=business_membership.business,
+        client=client_profile,
+        channel=ConversationMessage.Channel.TELEGRAM,
+        role=ConversationMessage.Role.USER,
+        content="Верните бота.",
+    )
+    thread = get_or_create_conversation_thread(
+        business=business_membership.business,
+        client=client_profile,
+        channel=ConversationMessage.Channel.TELEGRAM,
+    )
+    set_thread_mode(thread, ConversationThread.Mode.HUMAN_TAKEOVER)
+    client.force_login(owner_user)
+
+    response = client.post(
+        reverse("admin:bookings_conversationmessage_set_thread_mode"),
+        data={
+            "client_id": client_profile.id,
+            "channel": ConversationMessage.Channel.TELEGRAM,
+            "mode": ConversationThread.Mode.BOT_ACTIVE,
+        },
+    )
+
+    thread.refresh_from_db()
+    assert response.status_code == 302
+    assert thread.mode == ConversationThread.Mode.BOT_ACTIVE
+    assert thread.bot_paused_until is None
+
+
+@pytest.mark.django_db
+def test_owner_inbox_set_thread_mode_rejects_invalid_mode(
+    client,
+    owner_user,
+    business_membership,
+    client_profile,
+):
+    owner_user.is_staff = True
+    owner_user.save(update_fields=["is_staff"])
+    ConversationMessage.objects.create(
+        business=business_membership.business,
+        client=client_profile,
+        channel=ConversationMessage.Channel.TELEGRAM,
+        role=ConversationMessage.Role.USER,
+        content="Проверка режима.",
+    )
+    client.force_login(owner_user)
+
+    response = client.post(
+        reverse("admin:bookings_conversationmessage_set_thread_mode"),
+        data={
+            "client_id": client_profile.id,
+            "channel": ConversationMessage.Channel.TELEGRAM,
+            "mode": "broken",
+        },
+    )
+
+    assert response.status_code == 400
+    assert ConversationThread.objects.count() == 0
 
 
 @pytest.mark.django_db
@@ -6591,6 +6961,128 @@ def test_audit_admin_renders_technical_toggle(client):
 
 
 @pytest.mark.django_db
+def test_get_or_create_conversation_thread_defaults_to_bot_active(
+    business,
+    client_profile,
+):
+    thread = get_or_create_conversation_thread(
+        business=business,
+        client=client_profile,
+        channel=ConversationMessage.Channel.TELEGRAM,
+    )
+
+    assert thread.mode == ConversationThread.Mode.BOT_ACTIVE
+    assert thread.bot_paused_until is None
+    assert is_bot_active(thread) is True
+
+
+@pytest.mark.django_db
+def test_human_takeover_disables_bot(business, client_profile):
+    thread = ConversationThread.objects.create(
+        business=business,
+        client=client_profile,
+        channel=ConversationMessage.Channel.TELEGRAM,
+        mode=ConversationThread.Mode.HUMAN_TAKEOVER,
+    )
+
+    assert is_bot_active(thread) is False
+
+
+@pytest.mark.django_db
+def test_future_bot_pause_disables_bot(business, client_profile):
+    thread = ConversationThread.objects.create(
+        business=business,
+        client=client_profile,
+        channel=ConversationMessage.Channel.TELEGRAM,
+        mode=ConversationThread.Mode.BOT_PAUSED_UNTIL,
+        bot_paused_until=timezone.now() + timedelta(minutes=15),
+    )
+
+    assert is_bot_active(thread) is False
+
+
+@pytest.mark.django_db
+def test_expired_bot_pause_reactivates_bot(business, client_profile):
+    thread = ConversationThread.objects.create(
+        business=business,
+        client=client_profile,
+        channel=ConversationMessage.Channel.TELEGRAM,
+        mode=ConversationThread.Mode.BOT_ACTIVE,
+    )
+    ConversationThread.objects.filter(pk=thread.pk).update(
+        mode=ConversationThread.Mode.BOT_PAUSED_UNTIL,
+        bot_paused_until=timezone.now() - timedelta(minutes=1),
+    )
+    thread.refresh_from_db()
+
+    assert is_bot_active(thread) is True
+    thread.refresh_from_db()
+    assert thread.mode == ConversationThread.Mode.BOT_ACTIVE
+    assert thread.bot_paused_until is None
+
+
+@pytest.mark.django_db
+def test_invalid_pause_without_timestamp_does_not_auto_repair(
+    business,
+    client_profile,
+):
+    thread = ConversationThread.objects.create(
+        business=business,
+        client=client_profile,
+        channel=ConversationMessage.Channel.TELEGRAM,
+        mode=ConversationThread.Mode.BOT_ACTIVE,
+    )
+    ConversationThread.objects.filter(pk=thread.pk).update(
+        mode=ConversationThread.Mode.BOT_PAUSED_UNTIL,
+        bot_paused_until=None,
+    )
+    thread.refresh_from_db()
+
+    assert is_bot_active(thread) is False
+    thread.refresh_from_db()
+    assert thread.mode == ConversationThread.Mode.BOT_PAUSED_UNTIL
+    assert thread.bot_paused_until is None
+
+
+@pytest.mark.django_db
+def test_pause_bot_for_human_reply_sets_temporary_pause(business, client_profile):
+    thread = ConversationThread.objects.create(
+        business=business,
+        client=client_profile,
+        channel=ConversationMessage.Channel.TELEGRAM,
+    )
+    before = timezone.now()
+
+    pause_bot_for_human_reply(thread)
+
+    thread.refresh_from_db()
+    assert thread.mode == ConversationThread.Mode.BOT_PAUSED_UNTIL
+    assert thread.bot_paused_until >= before + timedelta(minutes=29)
+    assert thread.bot_paused_until <= timezone.now() + timedelta(minutes=31)
+
+
+@pytest.mark.django_db
+def test_set_thread_mode_clears_pause_timestamp(business, client_profile):
+    thread = ConversationThread.objects.create(
+        business=business,
+        client=client_profile,
+        channel=ConversationMessage.Channel.TELEGRAM,
+        mode=ConversationThread.Mode.BOT_ACTIVE,
+    )
+    ConversationThread.objects.filter(pk=thread.pk).update(
+        mode=ConversationThread.Mode.BOT_PAUSED_UNTIL,
+        bot_paused_until=timezone.now() + timedelta(minutes=30),
+    )
+    thread.refresh_from_db()
+
+    set_thread_mode(thread, ConversationThread.Mode.BOT_ACTIVE)
+
+    thread.refresh_from_db()
+    assert thread.mode == ConversationThread.Mode.BOT_ACTIVE
+    assert thread.bot_paused_until is None
+
+
+@pytest.mark.django_db
 def test_owner_admin_index_renders_salon_dashboard(
     client,
     owner_user,
@@ -6606,15 +7098,12 @@ def test_owner_admin_index_renders_salon_dashboard(
     service.business = business_membership.business
     service.save(update_fields=["business"])
     now = timezone.now()
-    today_at_noon = timezone.make_aware(
-        datetime.combine(timezone.localdate(), time(12, 0))
-    )
     Booking.objects.create(
         business=business_membership.business,
         master=master,
         service=service,
         client=client_profile,
-        start_time=today_at_noon,
+        start_time=now + timedelta(minutes=30),
         status=Booking.Status.PENDING,
     )
     upcoming_booking = Booking.objects.create(

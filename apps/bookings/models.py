@@ -468,7 +468,7 @@ class Client(TimeStampedModel):
         related_name="clients",
     )
     name = models.CharField(max_length=100, blank=True)
-    phone = PhoneNumberField(region="KZ")
+    phone = PhoneNumberField(region="KZ", blank=True, null=True)
     external_id = models.CharField(max_length=100, blank=True)
     telegram_id = models.CharField(max_length=50, blank=True, null=True)
     whatsapp_id = models.CharField(max_length=50, blank=True, null=True)
@@ -734,3 +734,193 @@ class ConversationMessage(TimeStampedModel):
             cls.objects.filter(
                 id__in=stale_message_ids
             ).delete()
+
+
+class ConversationThread(TimeStampedModel):
+    class Mode(models.TextChoices):
+        BOT_ACTIVE = "bot_active", _("Bot active")
+        HUMAN_TAKEOVER = "human_takeover", _("Human takeover")
+        BOT_PAUSED_UNTIL = "bot_paused_until", _("Bot paused until")
+
+    business = models.ForeignKey(
+        Business,
+        on_delete=models.CASCADE,
+        related_name="conversation_threads",
+    )
+    client = models.ForeignKey(
+        Client,
+        on_delete=models.CASCADE,
+        related_name="conversation_threads",
+    )
+    channel = models.CharField(
+        max_length=20,
+        choices=ConversationMessage.Channel.choices,
+    )
+    mode = models.CharField(
+        max_length=32,
+        choices=Mode.choices,
+        default=Mode.BOT_ACTIVE,
+    )
+    bot_paused_until = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ("business_id", "client_id", "channel")
+        verbose_name = _("conversation thread")
+        verbose_name_plural = _("conversation threads")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("business", "client", "channel"),
+                name="uniq_conversation_thread_per_client_channel",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=("business", "client", "channel", "mode"),
+                name="bookings_thread_mode_idx",
+            ),
+            models.Index(
+                fields=("bot_paused_until",),
+                name="bookings_thread_paused_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.business_id}:{self.client_id}:{self.channel}"
+            f" [{self.mode}]"
+        )
+
+    def clean(self):
+        super().clean()
+        if self.client_id and self.business_id != self.client.business_id:
+            raise ValidationError(
+                {"client": _("Client must belong to the same business.")}
+            )
+        if self.mode != self.Mode.BOT_PAUSED_UNTIL and self.bot_paused_until:
+            raise ValidationError(
+                {
+                    "bot_paused_until": _(
+                        "Paused-until timestamp is only valid for paused mode."
+                    )
+                }
+            )
+        if self.mode == self.Mode.BOT_PAUSED_UNTIL and not self.bot_paused_until:
+            raise ValidationError(
+                {"bot_paused_until": _("Paused mode requires a timestamp.")}
+            )
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
+class BookingSession(TimeStampedModel):
+    SESSION_TTL = timedelta(minutes=60)
+
+    class State(models.TextChoices):
+        IDLE = "idle", _("Idle")
+        AWAITING_DATE = "awaiting_date", _("Awaiting date")
+        AWAITING_SLOT_CHOICE = "awaiting_slot_choice", _("Awaiting slot choice")
+        AWAITING_CONFIRMATION = "awaiting_confirmation", _("Awaiting confirmation")
+
+    business = models.ForeignKey(
+        Business,
+        on_delete=models.CASCADE,
+        related_name="booking_sessions",
+    )
+    client = models.ForeignKey(
+        Client,
+        on_delete=models.CASCADE,
+        related_name="booking_sessions",
+    )
+    channel = models.CharField(
+        max_length=20,
+        choices=ConversationMessage.Channel.choices,
+    )
+    state = models.CharField(
+        max_length=32,
+        choices=State.choices,
+        default=State.IDLE,
+    )
+    service = models.ForeignKey(
+        Service,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="booking_sessions",
+    )
+    master = models.ForeignKey(
+        Master,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="booking_sessions",
+    )
+    target_date = models.DateField(null=True, blank=True)
+    selected_start_time = models.DateTimeField(null=True, blank=True)
+    selected_end_time = models.DateTimeField(null=True, blank=True)
+    slot_options = models.JSONField(default=list, blank=True)
+    context = models.JSONField(default=dict, blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ("business_id", "client_id", "channel")
+        verbose_name = _("booking session")
+        verbose_name_plural = _("booking sessions")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("business", "client", "channel"),
+                name="uniq_booking_session_per_client_channel",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=("expires_at",)),
+            models.Index(fields=("business", "client", "channel", "state")),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.business_id}:{self.client_id}:{self.channel}"
+            f" [{self.state}]"
+        )
+
+    @property
+    def is_expired(self):
+        return bool(self.expires_at and self.expires_at <= timezone.now())
+
+    def touch_expiration(self):
+        self.expires_at = timezone.now() + self.SESSION_TTL
+
+    def reset(self, *, keep_expiration: bool = False):
+        self.state = self.State.IDLE
+        self.service = None
+        self.master = None
+        self.target_date = None
+        self.selected_start_time = None
+        self.selected_end_time = None
+        self.slot_options = []
+        self.context = {}
+        if not keep_expiration:
+            self.touch_expiration()
+        return self
+
+    def clean(self):
+        super().clean()
+        if self.client_id and self.business_id != self.client.business_id:
+            raise ValidationError(
+                {"client": _("Client must belong to the same business.")}
+            )
+        if self.service_id and self.business_id != self.service.business_id:
+            raise ValidationError(
+                {"service": _("Service must belong to the same business.")}
+            )
+        if self.master_id and self.business_id != self.master.business_id:
+            raise ValidationError(
+                {"master": _("Master must belong to the same business.")}
+            )
+
+    def save(self, *args, **kwargs):
+        if self.expires_at is None:
+            self.touch_expiration()
+        self.full_clean()
+        return super().save(*args, **kwargs)
