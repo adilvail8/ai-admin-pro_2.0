@@ -832,6 +832,8 @@ class BookingSession(TimeStampedModel):
         AWAITING_DATE = "awaiting_date", _("Awaiting date")
         AWAITING_SLOT_CHOICE = "awaiting_slot_choice", _("Awaiting slot choice")
         AWAITING_CONFIRMATION = "awaiting_confirmation", _("Awaiting confirmation")
+        CANCEL_CHOOSING = "cancel_choosing", _("Cancellation: choosing booking")
+        CANCEL_CONFIRMING = "cancel_confirming", _("Cancellation: confirming booking")
 
     business = models.ForeignKey(
         Business,

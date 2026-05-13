@@ -121,6 +121,17 @@ def build_cancellation_confirmation_prompt(*, booking, language: str) -> str:
     )
 
 
+def build_cancellation_aborted_reply(*, language: str) -> str:
+    """Reply when the client rejects the cancellation confirmation prompt."""
+    if language == "kz":
+        return (
+            "Жақсы, жазбаны тоқтатпаймын. Тағы бірдеңе керек болса — жаза салыңыз."
+        )
+    return (
+        "Хорошо, не отменяю запись. Если что-то ещё нужно — напишите."
+    )
+
+
 def build_cancellation_success_reply(*, booking, language: str) -> str:
     """Confirmation that a booking has been cancelled."""
     service_name = localize_service_name(booking.service.name, language)

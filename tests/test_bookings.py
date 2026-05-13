@@ -110,11 +110,13 @@ from apps.bookings.webhooks import (
     VOICE_FALLBACK_MESSAGE,
     build_booking_created_reply,
     build_booking_confirmation_reply,
+    build_cancellation_aborted_reply,
     build_cancellation_confirmation_prompt,
     build_cancellation_handoff_reply,
     build_cancellation_multiple_bookings_reply,
     build_cancellation_no_active_bookings_reply,
     build_cancellation_success_reply,
+    get_client_active_bookings,
     build_date_selection_reply,
     build_existing_booking_reply,
     build_master_list_reply,
@@ -4535,6 +4537,75 @@ def test_build_cancellation_handoff_reply_localized():
     kz_reply = build_cancellation_handoff_reply(language="kz")
     assert "администратор" in ru_reply.lower()
     assert "әкімші" in kz_reply.lower()
+
+
+def test_build_cancellation_aborted_reply_localized():
+    ru_reply = build_cancellation_aborted_reply(language="ru")
+    kz_reply = build_cancellation_aborted_reply(language="kz")
+    assert "не отменяю" in ru_reply.lower()
+    assert "тоқтатпаймын" in kz_reply.lower()
+
+
+@pytest.mark.django_db
+def test_get_client_active_bookings_returns_future_pending_and_confirmed(
+    business,
+    client_profile,
+    master,
+    service,
+):
+    now = timezone.now()
+    # Past booking — should NOT appear (already happened).
+    # Model validation blocks creating with past start_time, so create with
+    # future start_time then move it back via direct queryset update.
+    past_booking = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=now + timedelta(days=10),
+        client_data={"name": "Aigerim"},
+        status=Booking.Status.CONFIRMED,
+    )
+    Booking.objects.filter(pk=past_booking.pk).update(
+        start_time=now - timedelta(days=1),
+        end_time=now - timedelta(days=1) + timedelta(minutes=75),
+    )
+    # Cancelled future booking — should NOT appear.
+    Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=now + timedelta(days=2),
+        client_data={"name": "Aigerim"},
+        status=Booking.Status.CANCELLED,
+    )
+    # Future CONFIRMED — should appear.
+    far = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=now + timedelta(days=5),
+        client_data={"name": "Aigerim"},
+        status=Booking.Status.CONFIRMED,
+    )
+    # Future PENDING — should appear, and come first (earlier start_time).
+    near = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=now + timedelta(days=1),
+        client_data={"name": "Aigerim"},
+        status=Booking.Status.PENDING,
+    )
+
+    result = get_client_active_bookings(
+        business_id=business.id, client=client_profile
+    )
+
+    assert [b.id for b in result] == [near.id, far.id]
 
 
 def test_build_cancellation_no_active_bookings_reply_localized():

@@ -34,6 +34,7 @@ from .replies import (
     build_booking_confirmation_reply,
     build_booking_created_reply,
     build_booking_intent_clarification_reply,
+    build_cancellation_aborted_reply,
     build_cancellation_confirmation_prompt,
     build_cancellation_handoff_reply,
     build_cancellation_multiple_bookings_reply,
@@ -195,6 +196,25 @@ def get_latest_active_booking(*, business_id: int, client: Client):
         )
         .order_by("-created_at")
         .first()
+    )
+
+
+def get_client_active_bookings(*, business_id: int, client: Client) -> list[Booking]:
+    """Return all active bookings of a client that are still in the future.
+
+    Used by the cancellation flow — we only let the client cancel bookings
+    that haven't started yet. Ordered by start_time ascending so the
+    numbered list shown to the client reads chronologically.
+    """
+    return list(
+        Booking.objects.filter(
+            business_id=business_id,
+            client=client,
+            status__in=[Booking.Status.PENDING, Booking.Status.CONFIRMED],
+            start_time__gt=timezone.now(),
+        )
+        .select_related("service", "master")
+        .order_by("start_time")
     )
 
 
