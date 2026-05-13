@@ -57,6 +57,15 @@ class Business(TimeStampedModel):
         help_text=_("Business-specific context for the AI assistant."),
     )
     timezone_name = models.CharField(max_length=64, default="Asia/Almaty")
+    cancellation_policy_hours = models.PositiveSmallIntegerField(
+        default=2,
+        help_text=_(
+            "Минимальный запас часов до начала записи, при котором клиент "
+            "может отменить её через бота. Если до записи остаётся меньше "
+            "этого порога — бот эскалирует запрос на администратора. "
+            "0 = разрешать отмену в любое время."
+        ),
+    )
     is_active = models.BooleanField(default=True)
 
     class Meta:

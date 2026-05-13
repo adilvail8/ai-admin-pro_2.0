@@ -757,6 +757,35 @@ class BusinessAdmin(TenantScopedAdminMixin, ModelAdmin):
     list_display = ("name", "timezone_name", "colored_active", "created_at")
     list_filter = ("is_active",)
     search_fields = ("name", "slug")
+    fieldsets = (
+        (
+            "Основные данные",
+            {"fields": ("name", "brand_name", "address", "city", "slug")},
+        ),
+        (
+            "Расписание",
+            {"fields": ("working_hours", "timezone_name")},
+        ),
+        (
+            "AI-настройки",
+            {"fields": ("ai_settings", "ai_rules", "knowledge_base")},
+        ),
+        (
+            "Политика бота",
+            {
+                "fields": ("cancellation_policy_hours",),
+                "description": (
+                    "Поведение бота при запросах от клиентов. "
+                    "Порог отмены: за сколько часов до начала клиент "
+                    "может отменить запись через бота без оператора."
+                ),
+            },
+        ),
+        (
+            "Статус",
+            {"fields": ("is_active",)},
+        ),
+    )
 
     def get_queryset(self, request):
         queryset = super(TenantScopedAdminMixin, self).get_queryset(request)
