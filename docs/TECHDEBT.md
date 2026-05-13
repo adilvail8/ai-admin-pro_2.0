@@ -7,16 +7,23 @@
 
 ## 🚨 До запуска WhatsApp (безопасность)
 
-### 1. `green_api_webhook` — отсутствует валидация `business_id`
+### 1. `green_api_webhook` — частичная валидация `business_id` (минимум закрыт)
 
-**Файл:** `apps/bookings/views.py:140` (`extract_green_api_business_id`)
+**Файл:** `apps/bookings/security.py:validate_green_api_business_id` + вызовы в `apps/bookings/views.py`.
 
-`business_id` принимается из payload или GET-параметра без проверки соответствия `instanceData.idInstance`. Один глобальный `GREEN_API_SHARED_SECRET` на все салоны → знающий секрет может писать webhook-сообщения от имени любого салона.
+**Закрыто в этой сессии:** добавлен whitelist `GREEN_API_BUSINESS_IDS` (env var, default пусто = backward compatible). Применяется в трёх местах:
+- `extract_green_api_business_id` (legacy provider payload)
+- `process_webhook_request` (legacy internal payload, channel=WHATSAPP)
+- `whatsapp_webhook(business_id)` (per-business URL)
 
-**Варианты фикса (по возрастанию строгости):**
-1. Production-минимум: настроить `GREEN_API_ALLOWED_IPS` на проде (только официальные Green API IPs).
-2. Deprecate legacy `green_api_webhook` в пользу per-business `whatsapp_webhook(business_id)` (URL: `/whatsapp/<business_id>`).
-3. Per-business `GREEN_API_INSTANCE_ID` в `Business` модели + lookup `idInstance → business` в `extract_green_api_business_id`.
+Атакующий со знанием `GREEN_API_SHARED_SECRET` больше не может слать webhook с произвольным `business_id` — только с теми, что в whitelist. **На проде обязательно** настроить `GREEN_API_BUSINESS_IDS=2,3` (реальные id Aura/Sultan).
+
+**Остаточный долг:** в рамках whitelist всё ещё возможна подмена между Aura↔Sultan (атакующему нужно знать оба id). Полное закрытие требует per-business credentials:
+- Поле `Business.green_api_instance_id` + миграция
+- Lookup business по `instanceData.idInstance` из payload вместо доверия `payload["business_id"]`
+- Отдельные `apiTokenInstance` на бизнес
+
+Это архитектурное изменение, делается отдельной сессией когда добавится второй реальный Green API instance.
 
 ---
 
@@ -63,11 +70,17 @@
 
 ---
 
-## ✅ Закрытые в этой сессии (2026-05-12)
+## ✅ Закрытые
 
+**2026-05-12:**
 - `is_affirmative_message` ×3 → ×1 (mojibake-safe версия) — `bc0fa9c`
 - N+1 в `get_inbox_dialogs` (180 → 1 запрос) — `5be17ec`
 - Opt-out reply локализация (ru/kz) — `773fb10`
+
+**2026-05-13:**
+- `security.py` extracted from `webhooks.py` — `183d637`
+- `language.py` extracted from `webhooks.py` — `c7a0afe`
+- Green API business_id whitelist — partial close of item #1
 
 ---
 

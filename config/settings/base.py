@@ -25,6 +25,7 @@ env = environ.Env(
     CORS_ALLOWED_ORIGINS=(list, []),
     CELERY_TASK_ALWAYS_EAGER=(bool, False),
     GREEN_API_ALLOWED_IPS=(list, []),
+    GREEN_API_BUSINESS_IDS=(list, []),
     DB_PORT=(int, 5432),
     DB_CONN_MAX_AGE=(int, 60),
 )
@@ -287,6 +288,7 @@ TELEGRAM_WEBHOOK_SECRET = env("TELEGRAM_WEBHOOK_SECRET", default="")
 TELEGRAM_BOT_TOKEN = env("TELEGRAM_BOT_TOKEN", default="")
 GREEN_API_SHARED_SECRET = env("GREEN_API_SHARED_SECRET", default="")
 GREEN_API_ALLOWED_IPS = env("GREEN_API_ALLOWED_IPS")
+GREEN_API_BUSINESS_IDS = [int(value) for value in env("GREEN_API_BUSINESS_IDS")]
 GREEN_API_URL = env("GREEN_API_URL", default="")
 GREEN_API_INSTANCE_ID = env("GREEN_API_INSTANCE_ID", default="")
 GREEN_API_API_TOKEN = env("GREEN_API_API_TOKEN", default="")

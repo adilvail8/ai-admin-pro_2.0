@@ -42,6 +42,7 @@ def build_unsupported_media_message(*, language: str, media_type: str = "") -> s
     return variants.get(language, variants["ru"])
 
 
+from .security import validate_green_api_business_id
 from .webhooks import (
     get_business,
     get_or_create_client,
@@ -141,7 +142,7 @@ def extract_green_api_business_id(*, payload: dict, request) -> int:
     business_id = payload.get("business_id") or request.GET.get("business_id")
     if not business_id:
         raise ValidationError("Green-API webhook requires business_id.")
-    return int(business_id)
+    return validate_green_api_business_id(int(business_id))
 
 
 def process_internal_event(*, event: dict, request):
@@ -172,6 +173,8 @@ def process_internal_event(*, event: dict, request):
 
 def process_webhook_request(*, payload: dict, request, channel: str):
     business_id = int(payload["business_id"])
+    if channel == ConversationMessage.Channel.WHATSAPP:
+        validate_green_api_business_id(business_id)
     business = get_business(business_id=business_id)
     provider_event_id = extract_provider_event_id(payload, channel)
     inbound_event, is_new = register_inbound_event(
@@ -396,6 +399,7 @@ def whatsapp_webhook(request, business_id: int):
             authorization=request.headers.get("Authorization", ""),
             remote_addr=request.META.get("REMOTE_ADDR", ""),
         )
+        validate_green_api_business_id(business_id)
     except ValidationError as error:
         return JsonResponse({"detail": str(error)}, status=403)
 

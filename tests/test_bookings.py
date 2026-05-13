@@ -5607,6 +5607,53 @@ def test_green_api_webhook_accepts_authorization_bearer_token(
 @override_settings(
     GREEN_API_SHARED_SECRET="green-secret",
     GREEN_API_ALLOWED_IPS=["127.0.0.1"],
+    GREEN_API_BUSINESS_IDS=[999_999],
+)
+def test_green_api_webhook_rejects_business_id_outside_whitelist(
+    client,
+    business,
+    monkeypatch,
+):
+    """When GREEN_API_BUSINESS_IDS is configured, webhooks for other ids are rejected.
+
+    Closes the legacy multi-tenancy hole where any caller knowing
+    GREEN_API_SHARED_SECRET could submit a webhook with an arbitrary
+    business_id and impersonate that salon.
+    """
+
+    def fake_handle_text_message(**kwargs):  # pragma: no cover — must not be reached
+        raise AssertionError("handler must not run for rejected business_id")
+
+    monkeypatch.setattr(
+        "apps.bookings.views.handle_text_message",
+        fake_handle_text_message,
+    )
+
+    response = client.post(
+        "/api/v1/webhooks/green-api/",
+        data=json.dumps(
+            {
+                "business_id": business.id,
+                "external_id": "wa-green-blocked",
+                "phone": "+77070000099",
+                "name": "Blocked User",
+                "text": "Привет",
+                "provider_event_id": "evt-green-blocked",
+            }
+        ),
+        content_type="application/json",
+        HTTP_X_GREENAPI_SECRET="green-secret",
+        REMOTE_ADDR="127.0.0.1",
+    )
+
+    assert response.status_code == 400
+    assert "business_id" in response.json()["detail"]
+
+
+@pytest.mark.django_db
+@override_settings(
+    GREEN_API_SHARED_SECRET="green-secret",
+    GREEN_API_ALLOWED_IPS=["127.0.0.1"],
 )
 def test_whatsapp_webhook_ignores_service_update(client, business, monkeypatch):
     monkeypatch.setattr(

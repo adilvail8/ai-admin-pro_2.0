@@ -54,6 +54,21 @@ def verify_green_api_request(
         raise ValidationError("Green-API IP is not allowed.")
 
 
+def validate_green_api_business_id(business_id: int) -> int:
+    """Reject Green-API webhooks for business_ids outside the configured whitelist.
+
+    When ``GREEN_API_BUSINESS_IDS`` is empty, the check is a no-op for
+    backward compatibility with existing deployments. Set the env var to
+    the comma-separated list of business primary keys that legitimately
+    receive Green-API messages (e.g. ``GREEN_API_BUSINESS_IDS=2,3``) to
+    block attackers who guess unused ids.
+    """
+    allowed = settings.GREEN_API_BUSINESS_IDS
+    if allowed and business_id not in allowed:
+        raise ValidationError("Green-API business_id is not allowed.")
+    return business_id
+
+
 def enforce_client_rate_limit(*, business_id: int, client: Client, channel: str):
     window_start = timezone.now() - timedelta(minutes=1)
     recent_messages_count = ConversationMessage.objects.filter(
