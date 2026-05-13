@@ -129,3 +129,42 @@ def get_service_recommended_masters(*, business: Business, service):
     if allowed_master_ids:
         masters = masters.filter(id__in=allowed_master_ids)
     return list(masters)
+
+
+# --- Haircut request detection -----------------------------------------
+
+def get_gendered_haircut_services(*, business: Business):
+    mens = None
+    womens = None
+    for service in business.services.filter(is_active=True).order_by("name"):
+        if service.name == "Men's Haircut":
+            mens = service
+        elif service.name == "Women's Haircut":
+            womens = service
+    return mens, womens
+
+
+def is_haircut_service(service) -> bool:
+    return service is not None and service.name in {"Men's Haircut", "Women's Haircut"}
+
+
+def detect_generic_haircut_request(*, business: Business, text: str) -> bool:
+    normalized = (text or "").strip().lower()
+    if not normalized:
+        return False
+
+    mens, womens = get_gendered_haircut_services(business=business)
+    if mens is None or womens is None:
+        return False
+
+    generic_markers = ("стриж", "подстричь", "подстричься", "шаш қию", "шаш кию")
+    male_markers = ("мужск", "кроп", "barber", "бород", "ерлер")
+    female_markers = ("женск", "әйел", "айел", "девоч", "әйелдер")
+
+    if not any(marker in normalized for marker in generic_markers):
+        return False
+    if any(marker in normalized for marker in male_markers):
+        return False
+    if any(marker in normalized for marker in female_markers):
+        return False
+    return True
