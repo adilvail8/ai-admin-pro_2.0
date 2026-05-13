@@ -669,6 +669,8 @@ class AIInteractionLog(TimeStampedModel):
         default=Status.SUCCESS,
     )
     error_message = models.TextField(blank=True)
+    prompt_tokens = models.PositiveIntegerField(null=True, blank=True)
+    completion_tokens = models.PositiveIntegerField(null=True, blank=True)
 
     class Meta:
         ordering = ("-created_at",)

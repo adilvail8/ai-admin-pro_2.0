@@ -374,6 +374,8 @@ class AIManager:
         summary_text: str = "",
         status: str,
         error_message: str = "",
+        prompt_tokens: int | None = None,
+        completion_tokens: int | None = None,
     ):
         if self.business is None:
             return None
@@ -385,7 +387,27 @@ class AIManager:
             model_name=self.model,
             status=status,
             error_message=error_message,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
         )
+
+    @staticmethod
+    def _extract_token_usage(*responses):
+        """Aggregate prompt/completion token counts across one or more
+        OpenAI responses. Returns (None, None) when no response carried
+        usage data (typical for mocked responses in tests).
+        """
+        prompt = 0
+        completion = 0
+        found = False
+        for response in responses:
+            usage = getattr(response, "usage", None)
+            if usage is None:
+                continue
+            found = True
+            prompt += getattr(usage, "prompt_tokens", 0) or 0
+            completion += getattr(usage, "completion_tokens", 0) or 0
+        return (prompt, completion) if found else (None, None)
 
     def get_ai_response(self, conversation_messages):
         prepared_messages, summary_text = self.prepare_conversation_messages(
@@ -397,11 +419,14 @@ class AIManager:
 
         if not tool_calls:
             final_text = message.content or ""
+            prompt_tokens, completion_tokens = self._extract_token_usage(response)
             self.log_interaction(
                 request_messages=self.build_messages(prepared_messages),
                 response_text=final_text,
                 summary_text=summary_text,
                 status=AIInteractionLog.Status.SUCCESS,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
             )
             return final_text
 
@@ -440,11 +465,16 @@ class AIManager:
 
         follow_up_response = self.create_chat_completion(tool_messages)
         final_text = follow_up_response.choices[0].message.content or ""
+        prompt_tokens, completion_tokens = self._extract_token_usage(
+            response, follow_up_response,
+        )
         self.log_interaction(
             request_messages=self.build_messages(tool_messages),
             response_text=final_text,
             summary_text=summary_text,
             status=AIInteractionLog.Status.SUCCESS,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
         )
         return final_text
 
