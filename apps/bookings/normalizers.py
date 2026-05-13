@@ -325,6 +325,20 @@ def normalize_incoming_event(channel: str, payload: dict, business_id: int) -> I
     raise ValidationError(f"Unsupported channel for normalizer: {channel}")
 
 
+def normalize_telegram_payload(payload: dict, business_id: int) -> dict:
+    event = normalize_telegram_event(payload, business_id)
+    message = event["message"]
+    return {
+        "business_id": event["business_id"],
+        "external_id": event["client"]["external_id"],
+        "phone": event["client"]["phone"],
+        "name": event["client"]["name"],
+        "text": message["text"] or message["caption"],
+        "unsupported_media": event["event_type"] == "unsupported",
+        "provider_event_id": str(payload.get("update_id", "")).strip() or message["message_id"],
+    }
+
+
 def legacy_payload_from_internal_event(event: InternalEvent) -> dict:
     text = event["message"]["text"] or event["message"]["caption"]
     return {

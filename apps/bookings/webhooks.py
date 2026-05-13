@@ -12,8 +12,14 @@ from django.utils import timezone
 from .ai_manager import AIManager, AI_RETRY_MESSAGE, HUMAN_HANDOFF_MESSAGE, VOICE_FALLBACK_MESSAGE
 from .client_identity import ClientIdentityResolver
 from .conversation_threads import get_or_create_conversation_thread, is_bot_active
-from .normalizers import normalize_telegram_event
 from .models import Booking, BookingSession, Business, Client, ConversationMessage, InboundEvent, Master
+from .security import (
+    RATE_LIMIT_MESSAGE,
+    enforce_client_rate_limit,
+    verify_green_api_request,
+    verify_telegram_secret,
+    verify_webhook_token,
+)
 from .session_state import (
     clear_booking_session,
     get_or_create_booking_session,
@@ -59,63 +65,10 @@ logger = logging.getLogger(__name__)
 POST_BOOKING_CONTEXT_MESSAGE_LIMIT = 6
 
 OPT_OUT_KEYWORDS = {"stop", "стоп", "отписаться", "не пиши", "не писать"}
-RATE_LIMIT_MESSAGE = (
-    "Слишком много сообщений за короткое время. Давайте продолжим через минуту."
-)
 HUMAN_HANDOFF_DELAY_MESSAGE = (
     "Не получилось сразу передать запрос администратору. "
     "Напишите еще раз через пару минут."
 )
-
-
-def verify_webhook_token(token: str):
-    expected_token = settings.WEBHOOK_SHARED_SECRET
-    if not expected_token:
-        raise ValidationError("Webhook token is not configured.")
-    if token != expected_token:
-        raise ValidationError("Invalid webhook token.")
-
-
-def normalize_telegram_payload(payload: dict, business_id: int) -> dict:
-    event = normalize_telegram_event(payload, business_id)
-    message = event["message"]
-    return {
-        "business_id": event["business_id"],
-        "external_id": event["client"]["external_id"],
-        "phone": event["client"]["phone"],
-        "name": event["client"]["name"],
-        "text": message["text"] or message["caption"],
-        "unsupported_media": event["event_type"] == "unsupported",
-        "provider_event_id": str(payload.get("update_id", "")).strip() or message["message_id"],
-    }
-
-
-def verify_telegram_secret(secret: str):
-    expected_secret = settings.TELEGRAM_WEBHOOK_SECRET
-    if not expected_secret:
-        raise ValidationError("Telegram webhook secret is not configured.")
-    if secret != expected_secret:
-        raise ValidationError("Invalid Telegram webhook secret.")
-
-
-def verify_green_api_request(
-    *,
-    token: str,
-    authorization: str = "",
-    remote_addr: str,
-):
-    candidate_token = token.strip()
-    if not candidate_token and authorization:
-        normalized_authorization = authorization.strip()
-        if " " in normalized_authorization:
-            _, candidate_token = normalized_authorization.split(" ", 1)
-        else:
-            candidate_token = normalized_authorization
-
-    if candidate_token != settings.GREEN_API_SHARED_SECRET:
-        raise ValidationError("Invalid Green-API signature.")
-    if settings.GREEN_API_ALLOWED_IPS and remote_addr not in settings.GREEN_API_ALLOWED_IPS:
-        raise ValidationError("Green-API IP is not allowed.")
 
 
 def get_business(*, business_id: int) -> Business:
@@ -286,19 +239,6 @@ def detect_client_language(
             {"role": ConversationMessage.Role.USER, "content": current_text.strip()}
         )
     return ai_manager.infer_response_language(conversation_messages)
-
-
-def enforce_client_rate_limit(*, business_id: int, client: Client, channel: str):
-    window_start = timezone.now() - timedelta(minutes=1)
-    recent_messages_count = ConversationMessage.objects.filter(
-        business_id=business_id,
-        client=client,
-        channel=channel,
-        role=ConversationMessage.Role.USER,
-        created_at__gte=window_start,
-    ).count()
-    if recent_messages_count >= settings.MAX_MESSAGES_PER_MINUTE:
-        raise ValidationError(RATE_LIMIT_MESSAGE)
 
 
 def process_opt_out(*, client: Client, text: str):

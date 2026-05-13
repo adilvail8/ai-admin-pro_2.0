@@ -78,6 +78,7 @@ from apps.bookings.conversation_threads import (
     pause_bot_for_human_reply,
     set_thread_mode,
 )
+from apps.bookings.normalizers import normalize_telegram_payload
 from apps.bookings.session_state import (
     get_or_create_booking_session,
     set_session_selected_slot,
@@ -123,7 +124,6 @@ from apps.bookings.webhooks import (
     handle_audio_message,
     handle_text_message,
     infer_service_from_messages,
-    normalize_telegram_payload,
     parse_explicit_calendar_date,
     store_message,
 )
