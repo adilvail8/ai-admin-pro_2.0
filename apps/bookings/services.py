@@ -350,6 +350,23 @@ def reschedule_appointment(
     if not getattr(target_master, "is_active", False):
         raise ValidationError("Master is inactive.")
 
+    # Defense in depth: Booking.save() will also call validate_domain_constraints
+    # which checks overlap, but checking here gives a clearer error message and
+    # protects the service contract from any future change to Booking.save()
+    # that might skip slot sync.
+    target_duration = locked_booking.total_slot_duration
+    target_end_time = start_time + target_duration
+    overlap_exists = (
+        Booking.objects.active()
+        .filter(master=target_master)
+        .overlaps(start_time, target_end_time)
+        .exclude(pk=locked_booking.pk)
+        .exists()
+    )
+    if overlap_exists:
+        raise ValidationError("Selected time slot is already taken.")
+
+    previous_start_time = locked_booking.start_time
     locked_booking.master = business.masters.select_for_update().get(
         pk=target_master.pk,
         is_active=True,
@@ -366,6 +383,7 @@ def reschedule_appointment(
         payload={
             "master_id": locked_booking.master_id,
             "status": locked_booking.status,
+            "previous_start_time": previous_start_time.isoformat(),
             "start_time": locked_booking.start_time.isoformat(),
             "end_time": locked_booking.end_time.isoformat(),
         },

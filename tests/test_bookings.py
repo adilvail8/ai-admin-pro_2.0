@@ -91,6 +91,7 @@ from apps.bookings.services import (
     create_appointment,
     execute_ai_function,
     get_available_slots,
+    reschedule_appointment,
 )
 from apps.bookings.tasks import (
     notify_human_operator,
@@ -634,6 +635,88 @@ def test_cancel_booking_for_client_rejects_foreign_client(
 
     booking.refresh_from_db()
     assert booking.status == Booking.Status.CONFIRMED
+
+
+@pytest.mark.django_db
+def test_reschedule_appointment_rejects_overlap(
+    business,
+    client_profile,
+    master,
+    service,
+):
+    # First booking occupies a slot.
+    occupied_start = timezone.now() + timedelta(days=2, hours=10)
+    Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=occupied_start,
+        client_data={"name": client_profile.name},
+        status=Booking.Status.CONFIRMED,
+    )
+
+    # Another booking for the same client/master at a different slot — we'll
+    # try to reschedule it onto the occupied one.
+    other_client = Client.objects.create(
+        business=business,
+        name="Other",
+        phone="+77079999111",
+    )
+    movable = Booking.objects.create(
+        business=business,
+        client=other_client,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(days=4, hours=10),
+        client_data={"name": other_client.name},
+        status=Booking.Status.CONFIRMED,
+    )
+
+    with pytest.raises(ValidationError, match="already taken"):
+        reschedule_appointment(
+            booking=movable,
+            business=business,
+            start_time=occupied_start,
+        )
+
+    movable.refresh_from_db()
+    assert movable.start_time != occupied_start
+
+
+@pytest.mark.django_db
+def test_reschedule_appointment_audit_contains_previous_start_time(
+    business,
+    client_profile,
+    master,
+    service,
+):
+    original_start = timezone.now() + timedelta(days=2, hours=10)
+    booking = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=original_start,
+        client_data={"name": client_profile.name},
+        status=Booking.Status.CONFIRMED,
+    )
+
+    new_start = timezone.now() + timedelta(days=3, hours=14)
+    reschedule_appointment(
+        booking=booking,
+        business=business,
+        start_time=new_start,
+    )
+
+    audit = AuditLog.objects.filter(
+        booking=booking, event_type="booking_rescheduled",
+    ).order_by("-created_at").first()
+    assert audit is not None
+    assert audit.payload["previous_start_time"] == original_start.isoformat()
+    # Sanity: new start_time is also recorded.
+    booking.refresh_from_db()
+    assert audit.payload["start_time"] == booking.start_time.isoformat()
 
 
 @pytest.mark.django_db
