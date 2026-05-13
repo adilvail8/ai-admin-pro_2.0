@@ -78,6 +78,10 @@ from apps.bookings.conversation_threads import (
     pause_bot_for_human_reply,
     set_thread_mode,
 )
+from apps.bookings.intent import (
+    detect_cancellation_request,
+    detect_reschedule_request,
+)
 from apps.bookings.normalizers import normalize_telegram_payload
 from apps.bookings.session_state import (
     get_or_create_booking_session,
@@ -4872,6 +4876,54 @@ def test_build_cancellation_handoff_reply_localized():
     kz_reply = build_cancellation_handoff_reply(language="kz")
     assert "администратор" in ru_reply.lower()
     assert "әкімші" in kz_reply.lower()
+
+
+def test_detect_reschedule_request_matches_common_phrases():
+    positives = [
+        "Можно перенести запись",
+        "Хочу перенест на четверг",
+        "Изменить время записи",
+        "Давайте на другое время",
+        "На другой день можно",
+        "Хочу на другое время",
+        "Ауыстырып бересіз бе?",
+        "Басқа уақыт болады ма",
+        "Басқа күнге жаздыр",
+    ]
+    for phrase in positives:
+        assert detect_reschedule_request(phrase), phrase
+    assert detect_reschedule_request("") is False
+    assert detect_reschedule_request("Хочу записаться") is False
+
+
+def test_detect_reschedule_and_cancellation_are_disjoint():
+    # Cancellation phrases must NOT trigger reschedule, and vice versa —
+    # otherwise the bot would route into the wrong state machine branch.
+    cancel_phrases = [
+        "Отмени запись",
+        "Хочу отменить",
+        "Не приду завтра",
+        "Не смогу прийти",
+        "Болдырма",
+        "Келе алмаймын",
+    ]
+    for phrase in cancel_phrases:
+        assert detect_cancellation_request(phrase), phrase
+        assert not detect_reschedule_request(phrase), (
+            f"reschedule wrongly matched cancellation phrase: {phrase!r}"
+        )
+
+    reschedule_phrases = [
+        "Можно перенести запись",
+        "Другое время",
+        "Изменить время",
+        "Ауыстыр",
+    ]
+    for phrase in reschedule_phrases:
+        assert detect_reschedule_request(phrase), phrase
+        assert not detect_cancellation_request(phrase), (
+            f"cancellation wrongly matched reschedule phrase: {phrase!r}"
+        )
 
 
 def test_build_cancellation_aborted_reply_localized():

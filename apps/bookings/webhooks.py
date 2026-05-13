@@ -81,6 +81,7 @@ from .intent import (
     detect_out_of_scope_followup_pressure,
     detect_out_of_scope_request,
     detect_price_request,
+    detect_reschedule_request,
     detect_service_catalog_request,
     has_affirmative_signal,
     is_affirmative_message,

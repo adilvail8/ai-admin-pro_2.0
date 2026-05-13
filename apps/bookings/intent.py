@@ -309,6 +309,30 @@ def detect_cancellation_request(text: str) -> bool:
     return any(keyword in normalized for keyword in keywords)
 
 
+def detect_reschedule_request(text: str) -> bool:
+    """Recognise that the client wants to move an existing booking to a new
+    time, rather than cancel it outright. Keyword set is deliberately
+    disjoint from ``detect_cancellation_request`` — "перенест" / "ауыст" /
+    "другое время" don't appear in the cancellation list.
+    """
+    normalized = (text or "").strip().lower()
+    if not normalized:
+        return False
+    keywords = (
+        "перенест",
+        "перенес",
+        "другое время",
+        "другой день",
+        "можно перенести",
+        "изменить время",
+        "хочу на другое",
+        "ауыст",
+        "басқа уақыт",
+        "басқа күн",
+    )
+    return any(keyword in normalized for keyword in keywords)
+
+
 # --- Intent detectors (Tier 2: keyword tables + siblings) --------------
 
 def detect_service_catalog_request(text: str) -> bool:
