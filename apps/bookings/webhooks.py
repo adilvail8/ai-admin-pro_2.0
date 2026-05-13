@@ -11,6 +11,7 @@ from django.utils import timezone
 
 from .ai_manager import AIManager, AI_RETRY_MESSAGE, HUMAN_HANDOFF_MESSAGE, VOICE_FALLBACK_MESSAGE
 from .client_identity import ClientIdentityResolver
+from .conversation_context import build_conversation_context, detect_client_language
 from .conversation_threads import get_or_create_conversation_thread, is_bot_active
 from .models import Booking, BookingSession, Business, Client, ConversationMessage, InboundEvent, Master
 from .language import (
@@ -221,27 +222,6 @@ def store_message(*, business_id: int, client: Client, channel: str, role: str, 
     return message
 
 
-def build_conversation_context(
-    *,
-    business_id: int,
-    client: Client,
-    channel: str,
-    max_messages: int | None = None,
-):
-    messages = list(
-        ConversationMessage.objects.filter(
-            business_id=business_id,
-            client=client,
-            channel=channel,
-        )
-        .order_by("created_at", "id")
-        .values("role", "content")
-    )
-    if max_messages is not None and max_messages > 0:
-        messages = messages[-max_messages:]
-    return [{"role": item["role"], "content": item["content"]} for item in messages]
-
-
 def should_limit_post_booking_context(*, session: BookingSession, booking, text: str) -> bool:
     if booking is None or session.state != BookingSession.State.IDLE:
         return False
@@ -267,26 +247,6 @@ def should_limit_post_booking_context(*, session: BookingSession, booking, text:
             "мастер",
         )
     )
-
-
-def detect_client_language(
-    *,
-    ai_manager: AIManager,
-    business_id: int,
-    client: Client,
-    channel: str,
-    current_text: str = "",
-):
-    conversation_messages = build_conversation_context(
-        business_id=business_id,
-        client=client,
-        channel=channel,
-    )
-    if current_text.strip():
-        conversation_messages.append(
-            {"role": ConversationMessage.Role.USER, "content": current_text.strip()}
-        )
-    return ai_manager.infer_response_language(conversation_messages)
 
 
 def process_opt_out(*, client: Client, text: str):
