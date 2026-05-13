@@ -4,7 +4,7 @@ from django import forms
 from django.contrib import admin
 from django.contrib import messages
 from django.core.exceptions import ValidationError
-from django.db.models import Count, Max, OuterRef, Q, Subquery
+from django.db.models import Count, Max, OuterRef, Q, Subquery, Sum
 from django.http import HttpResponseBadRequest
 from django.shortcuts import redirect
 from django.template.response import TemplateResponse
@@ -1715,13 +1715,36 @@ class AuditLogAdmin(TenantScopedAdminMixin, ModelAdmin):
         return queryset.exclude(event_type__in=TECHNICAL_AUDIT_EVENT_TYPES)
 
 
+BILLING_WINDOW_DAYS = 30
+# OpenAI gpt-4o-mini pricing (per 1M tokens, USD) — keep here as a single
+# source of truth. When pricing changes or a new model joins, update this
+# table; the summary view will pick it up immediately.
+AI_PRICING_USD_PER_MILLION = {
+    "gpt-4o-mini": {"prompt": 0.15, "completion": 0.60},
+    "default": {"prompt": 0.15, "completion": 0.60},
+}
+USD_TO_KZT = 450
+
+
+def _estimate_cost_kzt(prompt_tokens: int, completion_tokens: int, model_name: str = "") -> float:
+    pricing = AI_PRICING_USD_PER_MILLION.get(
+        model_name or "default", AI_PRICING_USD_PER_MILLION["default"]
+    )
+    prompt_cost_usd = (prompt_tokens or 0) * pricing["prompt"] / 1_000_000
+    completion_cost_usd = (completion_tokens or 0) * pricing["completion"] / 1_000_000
+    return (prompt_cost_usd + completion_cost_usd) * USD_TO_KZT
+
+
 @admin.register(AIInteractionLog)
 class AIInteractionLogAdmin(TenantScopedAdminMixin, ModelAdmin):
+    change_list_template = "admin/bookings/aiinteractionlog/change_list.html"
     list_display = (
         "id",
         "business",
         "model_name",
         "colored_status",
+        "prompt_tokens",
+        "completion_tokens",
         "created_at",
     )
     list_filter = ("business", "status", "model_name")
@@ -1736,3 +1759,41 @@ class AIInteractionLogAdmin(TenantScopedAdminMixin, ModelAdmin):
     )
     def colored_status(self, obj):
         return obj.status
+
+    def changelist_view(self, request, extra_context=None):
+        window_start = timezone.now() - timedelta(days=BILLING_WINDOW_DAYS)
+        queryset = self.get_queryset(request).filter(created_at__gte=window_start)
+
+        per_business = list(
+            queryset.values("business_id", "business__name")
+            .annotate(
+                calls=Count("id"),
+                prompt_total=Sum("prompt_tokens"),
+                completion_total=Sum("completion_tokens"),
+            )
+            .order_by("business__name")
+        )
+        for row in per_business:
+            row["prompt_total"] = row["prompt_total"] or 0
+            row["completion_total"] = row["completion_total"] or 0
+            row["estimated_cost_kzt"] = _estimate_cost_kzt(
+                row["prompt_total"], row["completion_total"]
+            )
+
+        totals = {
+            "calls": sum(r["calls"] for r in per_business),
+            "prompt": sum(r["prompt_total"] for r in per_business),
+            "completion": sum(r["completion_total"] for r in per_business),
+        }
+        totals["cost_kzt"] = _estimate_cost_kzt(totals["prompt"], totals["completion"])
+
+        extra_context = extra_context or {}
+        extra_context.update(
+            {
+                "billing_window_days": BILLING_WINDOW_DAYS,
+                "billing_per_business": per_business,
+                "billing_totals": totals,
+                "billing_show_breakdown": request.user.is_superuser and len(per_business) > 1,
+            }
+        )
+        return super().changelist_view(request, extra_context=extra_context)

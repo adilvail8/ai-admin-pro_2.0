@@ -1,0 +1,66 @@
+{% extends "admin/change_list.html" %}
+
+{% block content %}
+  <div class="billing-summary" style="margin: 16px 0; padding: 16px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px;">
+    <div style="font-size: 12px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 12px;">
+      AI расход за последние {{ billing_window_days }} дней
+    </div>
+    <div style="display: flex; gap: 24px; flex-wrap: wrap;">
+      <div>
+        <div style="font-size: 11px; color: #6b7280;">Всего вызовов</div>
+        <div style="font-size: 24px; font-weight: 600;">{{ billing_totals.calls }}</div>
+      </div>
+      <div>
+        <div style="font-size: 11px; color: #6b7280;">Prompt токены</div>
+        <div style="font-size: 24px; font-weight: 600;">{{ billing_totals.prompt }}</div>
+      </div>
+      <div>
+        <div style="font-size: 11px; color: #6b7280;">Completion токены</div>
+        <div style="font-size: 24px; font-weight: 600;">{{ billing_totals.completion }}</div>
+      </div>
+      <div>
+        <div style="font-size: 11px; color: #6b7280;">Оценка стоимости</div>
+        <div style="font-size: 24px; font-weight: 600; color: #059669;">
+          {{ billing_totals.cost_kzt|floatformat:0 }} ₸
+        </div>
+      </div>
+    </div>
+
+    {% if billing_show_breakdown and billing_per_business %}
+      <div style="margin-top: 20px;">
+        <div style="font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px;">
+          По бизнесам
+        </div>
+        <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+          <thead>
+            <tr style="border-bottom: 1px solid #e5e7eb; text-align: left;">
+              <th style="padding: 6px 8px;">Бизнес</th>
+              <th style="padding: 6px 8px; text-align: right;">Вызовы</th>
+              <th style="padding: 6px 8px; text-align: right;">Prompt</th>
+              <th style="padding: 6px 8px; text-align: right;">Completion</th>
+              <th style="padding: 6px 8px; text-align: right;">Оценка ₸</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in billing_per_business %}
+              <tr style="border-bottom: 1px solid #f3f4f6;">
+                <td style="padding: 6px 8px;">{{ row.business__name }}</td>
+                <td style="padding: 6px 8px; text-align: right;">{{ row.calls }}</td>
+                <td style="padding: 6px 8px; text-align: right;">{{ row.prompt_total }}</td>
+                <td style="padding: 6px 8px; text-align: right;">{{ row.completion_total }}</td>
+                <td style="padding: 6px 8px; text-align: right; font-weight: 500;">
+                  {{ row.estimated_cost_kzt|floatformat:0 }}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endif %}
+
+    <div style="margin-top: 12px; font-size: 11px; color: #9ca3af;">
+      Тариф: gpt-4o-mini ($0.15 / 1M prompt, $0.60 / 1M completion). Курс: 1 USD = 450 ₸.
+    </div>
+  </div>
+  {{ block.super }}
+{% endblock %}
