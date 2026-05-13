@@ -57,10 +57,83 @@ def build_haircut_clarification_reply(*, language: str) -> str:
     return "Уточните, пожалуйста: мужская или женская стрижка?"
 
 
-def build_cancellation_reply(*, language: str) -> str:
+def build_cancellation_handoff_reply(*, language: str) -> str:
+    """Reply used when the bot escalates a cancellation to a human operator.
+
+    Triggered either by late-escalation (less than
+    ``Business.cancellation_policy_hours`` until start) or by any other
+    code path that chooses to hand off rather than auto-cancel.
+    """
     if language == "kz":
         return "Түсіндім, жазбаны тоқтату өтінішіңізді әкімшіге бірден жіберемін. Ол сізбен жақын арада байланысады."
     return "Поняла, передам администратору запрос на отмену записи. Он свяжется с вами и подтвердит отмену."
+
+
+def build_cancellation_no_active_bookings_reply(*, language: str) -> str:
+    """Reply when the client asks to cancel but has no active bookings."""
+    if language == "kz":
+        return (
+            "Сізде қазір белсенді жазба көрінбейді. Жазылғыңыз келсе — "
+            "қандай қызметке және қашан керек, жаза салыңыз."
+        )
+    return (
+        "У вас сейчас нет активных записей. Если захотите записаться — "
+        "напишите, на какую услугу и когда, я подберу время."
+    )
+
+
+def build_cancellation_multiple_bookings_reply(
+    *, bookings: list, language: str
+) -> str:
+    """Numbered list of active bookings + prompt to pick one to cancel."""
+    lines = []
+    for index, booking in enumerate(bookings, start=1):
+        service_name = localize_service_name(booking.service.name, language)
+        when_label = format_local_datetime(booking.start_time, language=language)
+        lines.append(f"{index}. {service_name} — {when_label}")
+    listing = "\n".join(lines)
+
+    if language == "kz":
+        return (
+            "Сізде бірнеше белсенді жазба бар:\n"
+            f"{listing}\n"
+            "Қайсысын тоқтатамыз? Нөмірін жазыңыз."
+        )
+    return (
+        "У вас несколько активных записей:\n"
+        f"{listing}\n"
+        "Какую отменить? Напишите номер."
+    )
+
+
+def build_cancellation_confirmation_prompt(*, booking, language: str) -> str:
+    """Yes/no prompt before actually cancelling a booking."""
+    service_name = localize_service_name(booking.service.name, language)
+    when_label = format_local_datetime(booking.start_time, language=language)
+    if language == "kz":
+        return (
+            f"{service_name} ({when_label}) жазбасын тоқтатуға растайсыз ба? "
+            "«Иә» немесе «жоқ» деп жаза салыңыз."
+        )
+    return (
+        f"Точно отменить запись: {service_name} ({when_label})? "
+        "Напишите «да» или «нет»."
+    )
+
+
+def build_cancellation_success_reply(*, booking, language: str) -> str:
+    """Confirmation that a booking has been cancelled."""
+    service_name = localize_service_name(booking.service.name, language)
+    when_label = format_local_datetime(booking.start_time, language=language)
+    if language == "kz":
+        return (
+            f"Дайын, {service_name} ({when_label}) жазбасы тоқтатылды. "
+            "Ауыстырғыңыз келсе — жаза салыңыз, жаңа уақыт қарап беремін."
+        )
+    return (
+        f"Готово, запись на {service_name} ({when_label}) отменена. "
+        "Если захотите перенести — напишите, я подберу новое время."
+    )
 
 
 def build_price_clarification_reply(*, language: str) -> str:

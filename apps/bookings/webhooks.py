@@ -34,7 +34,11 @@ from .replies import (
     build_booking_confirmation_reply,
     build_booking_created_reply,
     build_booking_intent_clarification_reply,
-    build_cancellation_reply,
+    build_cancellation_confirmation_prompt,
+    build_cancellation_handoff_reply,
+    build_cancellation_multiple_bookings_reply,
+    build_cancellation_no_active_bookings_reply,
+    build_cancellation_success_reply,
     build_current_session_master_reply,
     build_date_selection_reply,
     build_existing_booking_reply,
@@ -927,7 +931,7 @@ def process_incoming_message(
                 attempts=client.ai_failure_count,
                 language=preferred_language,
             )
-            assistant_reply = build_cancellation_reply(language=preferred_language)
+            assistant_reply = build_cancellation_handoff_reply(language=preferred_language)
             store_message(
                 business_id=business_id,
                 client=client,

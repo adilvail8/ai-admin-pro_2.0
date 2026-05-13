@@ -110,6 +110,11 @@ from apps.bookings.webhooks import (
     VOICE_FALLBACK_MESSAGE,
     build_booking_created_reply,
     build_booking_confirmation_reply,
+    build_cancellation_confirmation_prompt,
+    build_cancellation_handoff_reply,
+    build_cancellation_multiple_bookings_reply,
+    build_cancellation_no_active_bookings_reply,
+    build_cancellation_success_reply,
     build_date_selection_reply,
     build_existing_booking_reply,
     build_master_list_reply,
@@ -4523,6 +4528,111 @@ def test_build_service_price_reply_is_short_and_human_for_russian(business):
 
     assert "«стрижка бороды» стоит 5000 тг." in reply
     assert "По времени — около 30 минут." in reply
+
+
+def test_build_cancellation_handoff_reply_localized():
+    ru_reply = build_cancellation_handoff_reply(language="ru")
+    kz_reply = build_cancellation_handoff_reply(language="kz")
+    assert "администратор" in ru_reply.lower()
+    assert "әкімші" in kz_reply.lower()
+
+
+def test_build_cancellation_no_active_bookings_reply_localized():
+    ru_reply = build_cancellation_no_active_bookings_reply(language="ru")
+    kz_reply = build_cancellation_no_active_bookings_reply(language="kz")
+    assert "нет активных записей" in ru_reply.lower()
+    assert "белсенді жазба" in kz_reply.lower()
+
+
+@pytest.mark.django_db
+def test_build_cancellation_multiple_bookings_reply_lists_each_booking(
+    business,
+    client_profile,
+    master,
+    service,
+):
+    start_a = timezone.now() + timedelta(days=2)
+    start_b = timezone.now() + timedelta(days=5)
+    booking_a = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=start_a,
+        client_data={"name": "Aigerim"},
+        status=Booking.Status.CONFIRMED,
+    )
+    booking_b = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=start_b,
+        client_data={"name": "Aigerim"},
+        status=Booking.Status.CONFIRMED,
+    )
+
+    reply = build_cancellation_multiple_bookings_reply(
+        bookings=[booking_a, booking_b],
+        language="ru",
+    )
+
+    assert "1." in reply
+    assert "2." in reply
+    assert "Какую отменить" in reply
+    # Service name appears (Haircut fixture has no localization, so it
+    # falls through unchanged).
+    assert "haircut" in reply.lower()
+
+
+@pytest.mark.django_db
+def test_build_cancellation_confirmation_prompt_asks_yes_or_no(
+    business,
+    client_profile,
+    master,
+    service,
+):
+    booking = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(days=2),
+        client_data={"name": "Aigerim"},
+        status=Booking.Status.CONFIRMED,
+    )
+
+    ru_reply = build_cancellation_confirmation_prompt(booking=booking, language="ru")
+    kz_reply = build_cancellation_confirmation_prompt(booking=booking, language="kz")
+
+    assert "точно отменить" in ru_reply.lower()
+    assert "«да»" in ru_reply.lower()
+    assert "«нет»" in ru_reply.lower()
+    assert "«иә»" in kz_reply.lower()
+
+
+@pytest.mark.django_db
+def test_build_cancellation_success_reply_mentions_booking_and_reschedule(
+    business,
+    client_profile,
+    master,
+    service,
+):
+    booking = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(days=2),
+        client_data={"name": "Aigerim"},
+        status=Booking.Status.CANCELLED,
+    )
+
+    reply = build_cancellation_success_reply(booking=booking, language="ru")
+
+    assert "отменена" in reply.lower()
+    assert "перенест" in reply.lower()  # invites reschedule
+    assert "haircut" in reply.lower()
 
 
 @pytest.mark.django_db
