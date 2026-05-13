@@ -3012,23 +3012,8 @@ def test_handle_text_message_rejects_wrong_master_name_for_current_session_servi
     assert "мужск" in response["reply"].lower() or "hair stylist" in response["reply"].lower()
 
 
-@pytest.mark.django_db
-def test_handle_text_message_escalates_cancellation_request_with_booking(
-    business,
-    client_profile,
-    master,
-    service,
-    monkeypatch,
-):
-    booking = Booking.objects.create(
-        business=business,
-        client=client_profile,
-        master=master,
-        service=service,
-        start_time=timezone.now() + timedelta(days=1),
-        status=Booking.Status.CONFIRMED,
-        client_data={"name": client_profile.name},
-    )
+def _stub_notify_human_operator(monkeypatch):
+    """Capture notify_human_operator.apply kwargs without running the AI escalation."""
 
     class DummyApplyResult:
         def get(self):
@@ -3041,10 +3026,61 @@ def test_handle_text_message_escalates_cancellation_request_with_booking(
         return DummyApplyResult()
 
     monkeypatch.setattr("apps.bookings.webhooks.notify_human_operator.apply", fake_apply)
+    # cancel_booking_for_client does a lazy `from .tasks import notify_human_operator`
+    # so we also patch the task object on the tasks module itself.
+    monkeypatch.setattr("apps.bookings.tasks.notify_human_operator.apply", fake_apply)
     monkeypatch.setattr(
         "apps.bookings.ai_manager.AIManager.generate_reply",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("AI should not be called")),
     )
+    return captured
+
+
+@pytest.mark.django_db
+def test_cancellation_no_active_bookings_reply(
+    business,
+    client_profile,
+    monkeypatch,
+):
+    _stub_notify_human_operator(monkeypatch)
+
+    response = handle_text_message(
+        business_id=business.id,
+        channel=ConversationMessage.Channel.WHATSAPP,
+        client=client_profile,
+        text="Хочу отменить запись",
+    )
+
+    assert response["escalated"] is False
+    assert "нет активных записей" in response["reply"].lower()
+    session = BookingSession.objects.filter(
+        business=business, client=client_profile,
+        channel=ConversationMessage.Channel.WHATSAPP,
+    ).first()
+    # No state change required — if a session was created it should stay IDLE.
+    if session is not None:
+        assert session.state == BookingSession.State.IDLE
+
+
+@pytest.mark.django_db
+def test_cancellation_late_request_escalates_to_operator(
+    business,
+    client_profile,
+    master,
+    service,
+    monkeypatch,
+):
+    # Booking starts in 30 minutes — well under default cancellation_policy_hours=2.
+    booking = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(minutes=30),
+        status=Booking.Status.CONFIRMED,
+        client_data={"name": client_profile.name},
+    )
+    captured = _stub_notify_human_operator(monkeypatch)
 
     response = handle_text_message(
         business_id=business.id,
@@ -3055,7 +3091,223 @@ def test_handle_text_message_escalates_cancellation_request_with_booking(
 
     assert response["escalated"] is True
     assert captured["booking_id"] == booking.id
-    assert "отмен" in response["reply"].lower()
+    assert "администратор" in response["reply"].lower()
+    booking.refresh_from_db()
+    assert booking.status == Booking.Status.CONFIRMED  # not auto-cancelled
+
+
+@pytest.mark.django_db
+def test_cancellation_single_booking_auto_cancels_with_confirmation(
+    business,
+    client_profile,
+    master,
+    service,
+    monkeypatch,
+):
+    booking = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(days=2),
+        status=Booking.Status.CONFIRMED,
+        client_data={"name": client_profile.name},
+    )
+    _stub_notify_human_operator(monkeypatch)
+
+    # Turn 1: cancellation request → confirmation prompt
+    response = handle_text_message(
+        business_id=business.id,
+        channel=ConversationMessage.Channel.WHATSAPP,
+        client=client_profile,
+        text="Хочу отменить запись",
+    )
+    assert "точно отменить" in response["reply"].lower()
+    session = BookingSession.objects.get(
+        business=business, client=client_profile,
+        channel=ConversationMessage.Channel.WHATSAPP,
+    )
+    assert session.state == BookingSession.State.CANCEL_CONFIRMING
+    assert session.context["cancellation_booking_id"] == booking.id
+
+    # Turn 2: "да" → cancelled
+    response = handle_text_message(
+        business_id=business.id,
+        channel=ConversationMessage.Channel.WHATSAPP,
+        client=client_profile,
+        text="да",
+    )
+    assert "отменена" in response["reply"].lower()
+    booking.refresh_from_db()
+    assert booking.status == Booking.Status.CANCELLED
+    session.refresh_from_db()
+    assert session.state == BookingSession.State.IDLE
+
+
+@pytest.mark.django_db
+def test_cancellation_multiple_bookings_pick_then_cancel(
+    business,
+    client_profile,
+    master,
+    service,
+    monkeypatch,
+):
+    near = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(days=2),
+        status=Booking.Status.CONFIRMED,
+        client_data={"name": client_profile.name},
+    )
+    far = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(days=5),
+        status=Booking.Status.CONFIRMED,
+        client_data={"name": client_profile.name},
+    )
+    _stub_notify_human_operator(monkeypatch)
+
+    # Turn 1: cancellation → list with two items, CANCEL_CHOOSING
+    response = handle_text_message(
+        business_id=business.id,
+        channel=ConversationMessage.Channel.WHATSAPP,
+        client=client_profile,
+        text="Хочу отменить",
+    )
+    assert "1." in response["reply"]
+    assert "2." in response["reply"]
+    session = BookingSession.objects.get(
+        business=business, client=client_profile,
+        channel=ConversationMessage.Channel.WHATSAPP,
+    )
+    assert session.state == BookingSession.State.CANCEL_CHOOSING
+    assert session.context["cancellation_booking_ids"] == [near.id, far.id]
+
+    # Turn 2: "2" → pick far booking → confirmation prompt
+    response = handle_text_message(
+        business_id=business.id,
+        channel=ConversationMessage.Channel.WHATSAPP,
+        client=client_profile,
+        text="2",
+    )
+    assert "точно отменить" in response["reply"].lower()
+    session.refresh_from_db()
+    assert session.state == BookingSession.State.CANCEL_CONFIRMING
+    assert session.context["cancellation_booking_id"] == far.id
+
+    # Turn 3: "да" → far cancelled, near untouched
+    response = handle_text_message(
+        business_id=business.id,
+        channel=ConversationMessage.Channel.WHATSAPP,
+        client=client_profile,
+        text="да",
+    )
+    assert "отменена" in response["reply"].lower()
+    far.refresh_from_db()
+    near.refresh_from_db()
+    assert far.status == Booking.Status.CANCELLED
+    assert near.status == Booking.Status.CONFIRMED
+
+
+@pytest.mark.django_db
+def test_cancellation_confirming_negative_reply_aborts(
+    business,
+    client_profile,
+    master,
+    service,
+    monkeypatch,
+):
+    booking = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(days=2),
+        status=Booking.Status.CONFIRMED,
+        client_data={"name": client_profile.name},
+    )
+    _stub_notify_human_operator(monkeypatch)
+
+    # Turn 1: enter CANCEL_CONFIRMING
+    handle_text_message(
+        business_id=business.id,
+        channel=ConversationMessage.Channel.WHATSAPP,
+        client=client_profile,
+        text="отмени запись",
+    )
+
+    # Turn 2: "нет" → aborted, booking unchanged, session reset
+    response = handle_text_message(
+        business_id=business.id,
+        channel=ConversationMessage.Channel.WHATSAPP,
+        client=client_profile,
+        text="нет",
+    )
+    assert "не отменяю" in response["reply"].lower()
+    booking.refresh_from_db()
+    assert booking.status == Booking.Status.CONFIRMED
+    session = BookingSession.objects.get(
+        business=business, client=client_profile,
+        channel=ConversationMessage.Channel.WHATSAPP,
+    )
+    assert session.state == BookingSession.State.IDLE
+
+
+@pytest.mark.django_db
+def test_cancellation_choosing_invalid_input_reprompts(
+    business,
+    client_profile,
+    master,
+    service,
+    monkeypatch,
+):
+    Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(days=2),
+        status=Booking.Status.CONFIRMED,
+        client_data={"name": client_profile.name},
+    )
+    Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(days=5),
+        status=Booking.Status.CONFIRMED,
+        client_data={"name": client_profile.name},
+    )
+    _stub_notify_human_operator(monkeypatch)
+
+    # Enter CANCEL_CHOOSING
+    handle_text_message(
+        business_id=business.id,
+        channel=ConversationMessage.Channel.WHATSAPP,
+        client=client_profile,
+        text="хочу отменить",
+    )
+
+    # Garbage input → re-prompt, state preserved
+    response = handle_text_message(
+        business_id=business.id,
+        channel=ConversationMessage.Channel.WHATSAPP,
+        client=client_profile,
+        text="что-то странное",
+    )
+    assert "1." in response["reply"]
+    assert "2." in response["reply"]
+    session = BookingSession.objects.get(
+        business=business, client=client_profile,
+        channel=ConversationMessage.Channel.WHATSAPP,
+    )
+    assert session.state == BookingSession.State.CANCEL_CHOOSING
 
 
 @pytest.mark.django_db

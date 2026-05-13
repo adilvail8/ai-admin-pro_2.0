@@ -115,7 +115,7 @@ from .session_state import (
     set_session_service,
     set_session_slot_options,
 )
-from .services import create_appointment, get_available_slots
+from .services import cancel_booking_for_client, create_appointment, get_available_slots
 from .tasks import async_prune_history, notify_human_operator
 
 logger = logging.getLogger(__name__)
@@ -541,6 +541,62 @@ def find_next_available_slots(*, business: Business, service, target_date, max_d
     return fallback_date, []
 
 
+def _parse_cancel_choice(text: str) -> int | None:
+    """Extract a 1-based booking number from a free-form CHOOSING reply."""
+    match = re.match(r"^\s*(\d+)\b", text or "")
+    return int(match.group(1)) if match else None
+
+
+def _route_single_booking_cancel(
+    *,
+    booking: Booking,
+    session: BookingSession,
+    business: Business,
+    client: Client,
+    channel: str,
+    language: str,
+) -> dict:
+    """Decide between auto-cancel-with-confirmation and late escalation.
+
+    Compares the time-until-start against ``business.cancellation_policy_hours``.
+    Above the threshold the bot asks for yes/no confirmation; below it the
+    request is handed off to a human operator unchanged.
+    """
+    hours_until = (booking.start_time - timezone.now()).total_seconds() / 3600
+    if hours_until < business.cancellation_policy_hours:
+        handoff_response = request_human_handoff(
+            booking=booking,
+            reason="Late cancellation request",
+            attempts=client.ai_failure_count,
+            language=language,
+        )
+        reply = build_cancellation_handoff_reply(language=language)
+        store_message(
+            business_id=business.id,
+            client=client,
+            channel=channel,
+            role=ConversationMessage.Role.ASSISTANT,
+            content=reply,
+        )
+        session.reset()
+        session.save()
+        return {"reply": reply, "escalated": handoff_response["escalated"]}
+
+    session.state = BookingSession.State.CANCEL_CONFIRMING
+    session.context = {"cancellation_booking_id": booking.id}
+    session.touch_expiration()
+    session.save()
+    reply = build_cancellation_confirmation_prompt(booking=booking, language=language)
+    store_message(
+        business_id=business.id,
+        client=client,
+        channel=channel,
+        role=ConversationMessage.Role.ASSISTANT,
+        content=reply,
+    )
+    return {"reply": reply, "escalated": False}
+
+
 def process_incoming_message(
     *,
     business_id: int,
@@ -645,6 +701,134 @@ def process_incoming_message(
         client=client,
         channel=channel,
     )
+
+    # === Cancellation continuation: pre-empt every other handler while
+    # the client is mid-flow choosing/confirming a booking to cancel. ===
+    if session.state == BookingSession.State.CANCEL_CHOOSING:
+        booking_ids = session.context.get("cancellation_booking_ids", []) if isinstance(session.context, dict) else []
+        choice = _parse_cancel_choice(normalized_text)
+        if choice is None or not (1 <= choice <= len(booking_ids)):
+            active_bookings = list(
+                Booking.objects.filter(
+                    pk__in=booking_ids,
+                    client=client,
+                    status__in=[Booking.Status.PENDING, Booking.Status.CONFIRMED],
+                )
+                .select_related("service", "master")
+                .order_by("start_time")
+            )
+            if not active_bookings:
+                session.reset()
+                session.save()
+                reply = build_cancellation_no_active_bookings_reply(language=preferred_language)
+            else:
+                reply = build_cancellation_multiple_bookings_reply(
+                    bookings=active_bookings,
+                    language=preferred_language,
+                )
+            store_message(
+                business_id=business_id,
+                client=client,
+                channel=channel,
+                role=ConversationMessage.Role.ASSISTANT,
+                content=reply,
+            )
+            return {"reply": reply, "escalated": False}
+
+        chosen_id = booking_ids[choice - 1]
+        chosen_booking = (
+            Booking.objects.filter(
+                pk=chosen_id,
+                client=client,
+                business=business,
+                status__in=[Booking.Status.PENDING, Booking.Status.CONFIRMED],
+            )
+            .select_related("service", "master")
+            .first()
+        )
+        if chosen_booking is None:
+            session.reset()
+            session.save()
+            reply = build_cancellation_no_active_bookings_reply(language=preferred_language)
+            store_message(
+                business_id=business_id,
+                client=client,
+                channel=channel,
+                role=ConversationMessage.Role.ASSISTANT,
+                content=reply,
+            )
+            return {"reply": reply, "escalated": False}
+        return _route_single_booking_cancel(
+            booking=chosen_booking,
+            session=session,
+            business=business,
+            client=client,
+            channel=channel,
+            language=preferred_language,
+        )
+
+    if session.state == BookingSession.State.CANCEL_CONFIRMING:
+        booking_id = (
+            session.context.get("cancellation_booking_id")
+            if isinstance(session.context, dict)
+            else None
+        )
+        target = (
+            Booking.objects.filter(
+                pk=booking_id,
+                client=client,
+                business=business,
+                status__in=[Booking.Status.PENDING, Booking.Status.CONFIRMED],
+            )
+            .select_related("service", "master")
+            .first()
+            if booking_id
+            else None
+        )
+        if target is None:
+            session.reset()
+            session.save()
+            reply = build_cancellation_no_active_bookings_reply(language=preferred_language)
+            store_message(
+                business_id=business_id,
+                client=client,
+                channel=channel,
+                role=ConversationMessage.Role.ASSISTANT,
+                content=reply,
+            )
+            return {"reply": reply, "escalated": False}
+        if has_affirmative_signal(normalized_text):
+            cancelled = cancel_booking_for_client(
+                booking=target,
+                client=client,
+                business=business,
+            )
+            session.reset()
+            session.save()
+            reply = build_cancellation_success_reply(
+                booking=cancelled,
+                language=preferred_language,
+            )
+            store_message(
+                business_id=business_id,
+                client=client,
+                channel=channel,
+                role=ConversationMessage.Role.ASSISTANT,
+                content=reply,
+            )
+            return {"reply": reply, "escalated": False}
+        session.reset()
+        session.save()
+        reply = build_cancellation_aborted_reply(language=preferred_language)
+        store_message(
+            business_id=business_id,
+            client=client,
+            channel=channel,
+            role=ConversationMessage.Role.ASSISTANT,
+            content=reply,
+        )
+        return {"reply": reply, "escalated": False}
+
     if detect_greeting_message(normalized_text):
         clear_booking_session(session)
         reply = build_greeting_reply(language=preferred_language)
@@ -944,25 +1128,48 @@ def process_incoming_message(
         return {"reply": reply, "escalated": False}
 
     if detect_cancellation_request(normalized_text):
-        if booking is not None:
-            handoff_response = request_human_handoff(
-                booking=booking,
-                reason="Client requested cancellation",
-                attempts=client.ai_failure_count,
-                language=preferred_language,
-            )
-            assistant_reply = build_cancellation_handoff_reply(language=preferred_language)
+        active_bookings = get_client_active_bookings(
+            business_id=business_id, client=client,
+        )
+        if not active_bookings:
+            reply = build_cancellation_no_active_bookings_reply(language=preferred_language)
             store_message(
                 business_id=business_id,
                 client=client,
                 channel=channel,
                 role=ConversationMessage.Role.ASSISTANT,
-                content=assistant_reply,
+                content=reply,
             )
-            return {
-                "reply": assistant_reply,
-                "escalated": handoff_response["escalated"],
+            return {"reply": reply, "escalated": False}
+
+        if len(active_bookings) > 1:
+            session.state = BookingSession.State.CANCEL_CHOOSING
+            session.context = {
+                "cancellation_booking_ids": [b.id for b in active_bookings],
             }
+            session.touch_expiration()
+            session.save()
+            reply = build_cancellation_multiple_bookings_reply(
+                bookings=active_bookings,
+                language=preferred_language,
+            )
+            store_message(
+                business_id=business_id,
+                client=client,
+                channel=channel,
+                role=ConversationMessage.Role.ASSISTANT,
+                content=reply,
+            )
+            return {"reply": reply, "escalated": False}
+
+        return _route_single_booking_cancel(
+            booking=active_bookings[0],
+            session=session,
+            business=business,
+            client=client,
+            channel=channel,
+            language=preferred_language,
+        )
 
     if detect_master_recommendation_request(normalized_text):
         if session.service_id:
