@@ -147,6 +147,82 @@ def build_cancellation_success_reply(*, booking, language: str) -> str:
     )
 
 
+def build_reschedule_no_active_bookings_reply(*, language: str) -> str:
+    """Reply when the client wants to move a booking but has none."""
+    if language == "kz":
+        return (
+            "Сізде қазір белсенді жазба көрінбейді. "
+            "Жазылғыңыз келсе — қандай қызмет керек, жаза салыңыз 😊"
+        )
+    return (
+        "У вас сейчас нет активных записей. "
+        "Если хотите записаться — напишите какая услуга вас интересует 😊"
+    )
+
+
+def build_reschedule_multiple_bookings_reply(*, bookings: list, language: str) -> str:
+    """Numbered list of active bookings + prompt to pick one to reschedule."""
+    lines = []
+    for index, booking in enumerate(bookings, start=1):
+        service_name = localize_service_name(booking.service.name, language)
+        when_label = format_local_datetime(booking.start_time, language=language)
+        lines.append(f"{index}. {service_name} — {when_label}")
+    listing = "\n".join(lines)
+
+    if language == "kz":
+        return (
+            "Сізде бірнеше жазба бар, қайсысын ауыстырамыз?\n"
+            f"{listing}"
+        )
+    return (
+        "У вас несколько записей, какую хотите перенести?\n"
+        f"{listing}"
+    )
+
+
+def build_reschedule_late_escalation_reply(*, booking, language: str) -> str:
+    """Reply when the requested reschedule is too close to the booking start.
+
+    Mirrors the cancellation late-escalation pattern: bot doesn't move
+    the booking itself, hands the request to a human operator who can
+    decide on the spot.
+    """
+    if language == "kz":
+        return (
+            "Жазбаға дейін уақыт өте аз қалды — өтінішіңізді "
+            "әкімшіге жіберемін, ол сізбен байланысып, ауыстыруға "
+            "көмектеседі 🙏"
+        )
+    return (
+        "До записи совсем мало времени — передаю запрос администратору, "
+        "он свяжется с вами и поможет перенести 🙏"
+    )
+
+
+def build_reschedule_initiated_reply(*, booking, language: str) -> str:
+    """Bot has accepted the reschedule request for a specific booking and is
+    asking the client which new date works.
+
+    Hands off into the standard date/slot/confirmation flow (the same
+    one used for fresh bookings) — that flow will detect the reschedule
+    context flag on the session and call reschedule_appointment instead
+    of create_appointment at the final confirm step.
+    """
+    service_name = localize_service_name(booking.service.name, language)
+    when_label = format_local_datetime(booking.start_time, language=language)
+    if language == "kz":
+        return (
+            "Жақсы, ауыстырайық!\n"
+            f"Қазіргі жазба: {service_name}, {when_label}.\n"
+            "Қай күнге ауыстырамыз?"
+        )
+    return (
+        "Хорошо, давайте перенесём!\n"
+        f"Текущая запись: {service_name}, {when_label}.\n"
+        "На какую дату удобно перенести?"
+    )
+
+
 def build_price_clarification_reply(*, language: str) -> str:
     if language == "kz":
         return "Қай қызметтің бағасы керек екенін жазыңыз."

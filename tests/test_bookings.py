@@ -121,6 +121,10 @@ from apps.bookings.webhooks import (
     build_cancellation_multiple_bookings_reply,
     build_cancellation_no_active_bookings_reply,
     build_cancellation_success_reply,
+    build_reschedule_initiated_reply,
+    build_reschedule_late_escalation_reply,
+    build_reschedule_multiple_bookings_reply,
+    build_reschedule_no_active_bookings_reply,
     get_client_active_bookings,
     build_date_selection_reply,
     build_existing_booking_reply,
@@ -4924,6 +4928,70 @@ def test_detect_reschedule_and_cancellation_are_disjoint():
         assert not detect_cancellation_request(phrase), (
             f"cancellation wrongly matched reschedule phrase: {phrase!r}"
         )
+
+
+def test_build_reschedule_no_active_bookings_reply_localized():
+    ru_reply = build_reschedule_no_active_bookings_reply(language="ru")
+    kz_reply = build_reschedule_no_active_bookings_reply(language="kz")
+    assert "нет активных записей" in ru_reply.lower()
+    assert "белсенді жазба" in kz_reply.lower()
+    assert ru_reply.strip() and kz_reply.strip()
+
+
+@pytest.mark.django_db
+def test_build_reschedule_multiple_bookings_reply_lists_each_booking(
+    business,
+    client_profile,
+    master,
+    service,
+):
+    a = Booking.objects.create(
+        business=business, client=client_profile, master=master, service=service,
+        start_time=timezone.now() + timedelta(days=2),
+        client_data={"name": client_profile.name},
+        status=Booking.Status.CONFIRMED,
+    )
+    b = Booking.objects.create(
+        business=business, client=client_profile, master=master, service=service,
+        start_time=timezone.now() + timedelta(days=5),
+        client_data={"name": client_profile.name},
+        status=Booking.Status.CONFIRMED,
+    )
+
+    reply = build_reschedule_multiple_bookings_reply(
+        bookings=[a, b], language="ru",
+    )
+
+    assert "перенести" in reply.lower()
+    assert "1." in reply
+    assert "2." in reply
+    assert "haircut" in reply.lower()  # fixture service name falls through
+
+
+@pytest.mark.django_db
+def test_build_reschedule_late_and_initiated_replies_localized(
+    business,
+    client_profile,
+    master,
+    service,
+):
+    booking = Booking.objects.create(
+        business=business, client=client_profile, master=master, service=service,
+        start_time=timezone.now() + timedelta(days=2),
+        client_data={"name": client_profile.name},
+        status=Booking.Status.CONFIRMED,
+    )
+
+    late_ru = build_reschedule_late_escalation_reply(booking=booking, language="ru")
+    late_kz = build_reschedule_late_escalation_reply(booking=booking, language="kz")
+    assert "администратор" in late_ru.lower()
+    assert "әкімші" in late_kz.lower()
+
+    init_ru = build_reschedule_initiated_reply(booking=booking, language="ru")
+    init_kz = build_reschedule_initiated_reply(booking=booking, language="kz")
+    assert "перенесём" in init_ru.lower() or "перенесем" in init_ru.lower()
+    assert "какую дату" in init_ru.lower() or "на какую дату" in init_ru.lower()
+    assert "ауыстыр" in init_kz.lower()
 
 
 def test_build_cancellation_aborted_reply_localized():
