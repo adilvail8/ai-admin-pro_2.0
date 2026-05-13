@@ -87,6 +87,7 @@ from apps.bookings.session_state import (
 )
 from apps.bookings.services import (
     OPENAI_FUNCTION_DEFINITIONS,
+    cancel_booking_for_client,
     create_appointment,
     execute_ai_function,
     get_available_slots,
@@ -533,6 +534,99 @@ def test_create_appointment_rejects_cross_tenant_client(
             start_time=timezone.now() + timedelta(days=2),
             client_data={"name": "Olga"},
         )
+
+
+@pytest.mark.django_db
+@override_settings(CELERY_TASK_ALWAYS_EAGER=False)
+def test_cancel_booking_for_client_marks_status_and_notifies(
+    business,
+    client_profile,
+    master,
+    service,
+    monkeypatch,
+):
+    booking = create_appointment(
+        business=business,
+        master=master,
+        service=service,
+        client=client_profile,
+        start_time=timezone.now() + timedelta(days=2),
+        client_data={"name": "Aigerim"},
+        status=Booking.Status.CONFIRMED,
+    )
+
+    captured = {}
+
+    def fake_delay(booking_id, reason):
+        captured["booking_id"] = booking_id
+        captured["reason"] = reason
+
+    # CELERY_TASK_ALWAYS_EAGER=False routes the helper through .delay(),
+    # so we stub that one — never schedules a real task, just records the
+    # operator-notification args.
+    monkeypatch.setattr(
+        "apps.bookings.tasks.notify_human_operator.delay",
+        fake_delay,
+    )
+
+    cancelled = cancel_booking_for_client(
+        booking=booking,
+        client=client_profile,
+        business=business,
+    )
+
+    cancelled.refresh_from_db()
+    assert cancelled.status == Booking.Status.CANCELLED
+
+    # update_booking_status writes a booking_status_updated audit row.
+    status_audit = AuditLog.objects.filter(
+        booking=cancelled,
+        event_type="booking_status_updated",
+    ).order_by("-created_at").first()
+    assert status_audit is not None
+    assert status_audit.payload["status"] == Booking.Status.CANCELLED
+
+    # Operator is notified about the freed slot.
+    assert captured["booking_id"] == cancelled.id
+    assert "client" in captured["reason"].lower()
+
+
+@pytest.mark.django_db
+@override_settings(CELERY_TASK_ALWAYS_EAGER=False)
+def test_cancel_booking_for_client_rejects_foreign_client(
+    business,
+    client_profile,
+    master,
+    service,
+):
+    booking = create_appointment(
+        business=business,
+        master=master,
+        service=service,
+        client=client_profile,
+        start_time=timezone.now() + timedelta(days=2),
+        client_data={"name": "Aigerim"},
+        status=Booking.Status.CONFIRMED,
+    )
+
+    other_client = Client.objects.create(
+        business=business,
+        name="Someone else",
+        phone="+77079999988",
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match="Booking does not belong to this client",
+    ):
+        cancel_booking_for_client(
+            booking=booking,
+            client=other_client,
+            business=business,
+        )
+
+    booking.refresh_from_db()
+    assert booking.status == Booking.Status.CONFIRMED
 
 
 @pytest.mark.django_db

@@ -404,6 +404,53 @@ def update_booking_status(
     return locked_booking
 
 
+@transaction.atomic
+def cancel_booking_for_client(
+    *,
+    booking: Booking,
+    client: Client,
+    business: Business,
+) -> Booking:
+    """Cancel a booking on behalf of the client who owns it.
+
+    Used by the bot when a client says "отмени запись" and the booking is
+    far enough in the future per ``Business.cancellation_policy_hours``.
+    Re-validates ownership and scope before mutating state, then defers
+    the operator-notification side effect to ``notify_human_operator``
+    so the owner sees the freed slot.
+
+    Raises ``ValidationError`` if the booking does not belong to the
+    given client/business pair — protects against confused-deputy and
+    multi-business leaks.
+    """
+    if booking.client_id != client.id:
+        raise ValidationError("Booking does not belong to this client.")
+    validate_booking_business_scope(booking=booking, business=business)
+
+    cancelled = update_booking_status(
+        booking=booking,
+        business=business,
+        status=Booking.Status.CANCELLED,
+    )
+
+    # Inform the operator about the freed slot. Use Celery if available so
+    # the webhook response stays snappy; fall back to eager when CI/dev
+    # mode forces it.
+    from django.conf import settings as _settings
+
+    from .tasks import notify_human_operator
+
+    reason = "Booking cancelled by client via bot"
+    if _settings.CELERY_TASK_ALWAYS_EAGER:
+        notify_human_operator.apply(
+            kwargs={"booking_id": cancelled.id, "reason": reason}
+        ).get()
+    else:
+        notify_human_operator.delay(booking_id=cancelled.id, reason=reason)
+
+    return cancelled
+
+
 OPENAI_FUNCTION_DEFINITIONS = [
     {
         "type": "function",
