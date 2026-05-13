@@ -41,32 +41,15 @@
 
 ## 🔧 Архитектурный долг
 
-### 3. `apps/bookings/webhooks.py` — 3644 строки в одном файле
+### 3. `process_incoming_message` — большой state machine (~750 строк)
 
-Сложно поддерживать, легко словить циклические импорты при правке. План декомпозиции:
+Декомпозиция `webhooks.py` 2026-05-13 разнесла helpers по 9 модулям, файл сжался 3611 → ~1820 строк. Что осталось — это **core flow**: `process_incoming_message`, `handle_text_message`, `handle_audio_message` + plumbing helpers. Дальнейшая декомпозиция возможна, но `process_incoming_message` — это coherent state machine, дробить её на 5 модулей может ухудшить читаемость. Решать когда вокруг появится новая фича, которая натурально потребует разбиения.
 
-- `webhooks/normalizers.py` — Telegram / Green API payload parsing
-- `webhooks/router.py` — `process_incoming_message`, диспетчер
-- `webhooks/replies.py` — все `build_*_reply` функции
-- `webhooks/security.py` — `verify_*_token`, rate limiting
-- `webhooks/language.py` — `detect_client_language`, локализация
-- `webhooks/views.py` — Django views (тонкие обёртки)
+### 4. Cancellation state preemption — узкое место
 
-Делать осторожно, pytest после каждого выноса.
+`CANCEL_CHOOSING` / `CANCEL_CONFIRMING` state handlers стоят **после** `out_of_scope` check и `service_catalog` check в `process_incoming_message`. Это значит, что если клиент в середине cancel-flow задаёт out-of-scope или просит каталог, ответ уходит мимо cancel-state, и при следующем сообщении state всё ещё активен (cancel-сессия "висит" до TTL=60 мин).
 
----
-
-## 📝 Мёртвый код (низкий приоритет)
-
-### 4. `build_*` v1-блок в `webhooks.py:1190-1301`
-
-4 функции (`build_master_recommendation_reply`, `build_service_master_options_reply`, `build_service_catalog_reply`, `build_master_list_reply`) имеют по второму определению в конце файла (overrides), которое побеждает в namespace. Версии в конце — сознательное продуктовое решение "compact and human style", защищённое тестами `test_build_*_is_compact_and_human_for_russian`.
-
-Первые определения никогда не вызываются.
-
-**Условие удаления:** после полной карты дублей в файле — есть и другие функции (`build_service_price_reply`, `build_price_clarification_reply`, `build_working_hours_reply`, `build_booking_confirmation_reply`, `build_booking_created_reply` x3, `build_existing_booking_reply` x3, `build_date_selection_reply`), у которых тоже могут быть override-варианты. Удалять только после понимания всех пар.
-
-Связано с пунктом 3 — естественно решается при декомпозиции.
+Не критично — клиент в худшем случае получит конфузный re-prompt и завершит flow позже. Полный фикс — перенести cancel-handlers выше out_of_scope/service_catalog checks, но это требует перенести также `session = get_or_create_booking_session(...)` выше (сейчас оно сразу после out_of_scope). Сделать когда появится UX feedback от боевых салонов.
 
 ---
 
@@ -81,6 +64,32 @@
 - `security.py` extracted from `webhooks.py` — `183d637`
 - `language.py` extracted from `webhooks.py` — `c7a0afe`
 - Green API business_id whitelist — partial close of item #1
+
+**2026-05-14 — webhooks.py decomposition (continued):**
+- Dead `build_*` v1/v2 overrides removed — `a5c73c0`
+- `service_matcher.py` extracted — `b452acc`
+- `replies.py` extracted (24 builders) — `eaba3c0`
+- `intent.py` + `text_utils.py` extracted — `6651f70`
+- `date_parser.py` extracted — `88b32a5`
+- `master_matcher.py` extracted — `0976b1a`
+- `conversation_context.py` extracted — `9b51c6e`
+- Haircut detection moved into `service_matcher.py` — `f6b6e85`
+- webhooks.py 3611 → 1769 lines (-51%), 9 focused modules
+
+**2026-05-14 — Cancellation flow (full):**
+- `Business.cancellation_policy_hours` field + migration — `7d65af0`
+- `cancel_booking_for_client` service helper — `2b81b94`
+- 5 cancellation reply builders (no_active / multi / confirmation prompt /
+  success / handoff rename) — `68b4056`
+- State machine foundations (CANCEL_CHOOSING, CANCEL_CONFIRMING,
+  get_client_active_bookings, aborted reply) — `ab4f261`
+- State machine wired into `process_incoming_message` with full coverage
+  (single / multi / late / race) — `f9f2019`
+
+The bot now self-cancels future bookings when the start is at least
+`Business.cancellation_policy_hours` away, asks for confirmation, and
+escalates to the operator only when it's too late. No more "promise
+without action".
 
 ---
 
