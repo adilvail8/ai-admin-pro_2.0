@@ -210,12 +210,14 @@ def build_reschedule_success_reply(*, booking, language: str) -> str:
         return (
             "✅ Дайын! Жазба ауыстырылды:\n"
             f"📅 {date_label}, {time_label}\n"
-            f"💅 {service_name} — Шебер {master_name}"
+            f"💅 {service_name} — Шебер {master_name}\n"
+            "Бір сағат бұрын еске саламын 😊"
         )
     return (
         "✅ Готово! Запись перенесена:\n"
         f"📅 {date_label} в {time_label}\n"
-        f"💅 {service_name} — Мастер {master_name}"
+        f"💅 {service_name} — Мастер {master_name}\n"
+        "За час напомню о новой записи 😊"
     )
 
 
@@ -461,8 +463,14 @@ def build_date_selection_reply(*, service, language: str) -> str:
 def build_booking_created_reply(*, service_name: str, local_start: datetime, master_name: str, language: str) -> str:
     local_start_label = format_local_datetime(local_start, language=language)
     if language == "kz":
-        return f"Жаздым: {service_name}, {local_start_label}, шебер {master_name}."
-    return f"Записала: {service_name}, {local_start_label}, мастер {master_name}."
+        return (
+            f"Жаздым: {service_name}, {local_start_label}, шебер {master_name}. "
+            "Бір сағат бұрын еске саламын 😊"
+        )
+    return (
+        f"Записала: {service_name}, {local_start_label}, мастер {master_name}. "
+        "За час напомню 😊"
+    )
 
 
 def build_existing_booking_reply(*, booking: Booking, language: str) -> str:
