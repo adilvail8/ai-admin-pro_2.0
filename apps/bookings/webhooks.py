@@ -121,7 +121,12 @@ from .session_state import (
     set_session_service,
     set_session_slot_options,
 )
-from .services import cancel_booking_for_client, create_appointment, get_available_slots
+from .services import (
+    cancel_booking_for_client,
+    create_appointment,
+    get_available_slots,
+    reschedule_appointment,
+)
 from .tasks import async_prune_history, notify_human_operator
 
 logger = logging.getLogger(__name__)
@@ -1310,6 +1315,56 @@ def process_incoming_message(
             language=preferred_language,
         )
 
+    if (
+        detect_reschedule_request(normalized_text)
+        and session.state == BookingSession.State.IDLE
+    ):
+        # Guard: only fire from IDLE. Otherwise "другой день" / "басқа күн"
+        # said while picking a date for a fresh booking would be mis-routed
+        # into reschedule. Mid-flow date phrases stay with the date handler.
+        active_bookings = get_client_active_bookings(
+            business_id=business_id, client=client,
+        )
+        if not active_bookings:
+            reply = build_reschedule_no_active_bookings_reply(language=preferred_language)
+            store_message(
+                business_id=business_id,
+                client=client,
+                channel=channel,
+                role=ConversationMessage.Role.ASSISTANT,
+                content=reply,
+            )
+            return {"reply": reply, "escalated": False}
+
+        if len(active_bookings) > 1:
+            session.state = BookingSession.State.RESCHEDULE_CHOOSING
+            session.context = {
+                "reschedule_booking_ids": [b.id for b in active_bookings],
+            }
+            session.touch_expiration()
+            session.save()
+            reply = build_reschedule_multiple_bookings_reply(
+                bookings=active_bookings,
+                language=preferred_language,
+            )
+            store_message(
+                business_id=business_id,
+                client=client,
+                channel=channel,
+                role=ConversationMessage.Role.ASSISTANT,
+                content=reply,
+            )
+            return {"reply": reply, "escalated": False}
+
+        return _route_single_booking_reschedule(
+            booking=active_bookings[0],
+            session=session,
+            business=business,
+            client=client,
+            channel=channel,
+            language=preferred_language,
+        )
+
     if detect_master_recommendation_request(normalized_text):
         if session.service_id:
             reply = build_service_master_options_reply(
@@ -1519,6 +1574,81 @@ def process_incoming_message(
         and session.selected_end_time is not None
         and is_affirmative_message(normalized_text)
     ):
+        # Reschedule path — the session was entered via _route_single_booking_reschedule,
+        # which stamped reschedule_booking_id into context. Apply the new
+        # slot to the existing booking instead of creating a new one.
+        reschedule_booking_id = (
+            session.context.get("reschedule_booking_id")
+            if isinstance(session.context, dict)
+            else None
+        )
+        if reschedule_booking_id:
+            target_booking = (
+                Booking.objects.filter(
+                    pk=reschedule_booking_id,
+                    client=client,
+                    business=business,
+                    status__in=[Booking.Status.PENDING, Booking.Status.CONFIRMED],
+                )
+                .select_related("service", "master")
+                .first()
+            )
+            if target_booking is None:
+                clear_booking_session(session)
+                reply = build_reschedule_no_active_bookings_reply(language=preferred_language)
+                store_message(
+                    business_id=business_id,
+                    client=client,
+                    channel=channel,
+                    role=ConversationMessage.Role.ASSISTANT,
+                    content=reply,
+                )
+                return {"reply": reply, "escalated": False}
+            try:
+                updated_booking = reschedule_appointment(
+                    booking=target_booking,
+                    business=business,
+                    start_time=session.selected_start_time,
+                    master=session.master,
+                )
+            except ValidationError as error:
+                # Slot taken / past / inactive master — let the client try
+                # again. Keep state so they can pick another time.
+                logger.info(
+                    "reschedule_validation_failed",
+                    extra={
+                        "business_id": business_id,
+                        "client_id": client.id,
+                        "booking_id": target_booking.id,
+                        "error": "; ".join(error.messages) if hasattr(error, "messages") else str(error),
+                    },
+                )
+                reply = build_reschedule_late_escalation_reply(
+                    booking=target_booking, language=preferred_language,
+                )
+                store_message(
+                    business_id=business_id,
+                    client=client,
+                    channel=channel,
+                    role=ConversationMessage.Role.ASSISTANT,
+                    content=reply,
+                )
+                clear_booking_session(session)
+                return {"reply": reply, "escalated": False}
+
+            clear_booking_session(session)
+            reply = build_reschedule_success_reply(
+                booking=updated_booking, language=preferred_language,
+            )
+            store_message(
+                business_id=business_id,
+                client=client,
+                channel=channel,
+                role=ConversationMessage.Role.ASSISTANT,
+                content=reply,
+            )
+            return {"reply": reply, "escalated": False}
+
         booking_record = create_appointment(
             business=business,
             master=session.master,
