@@ -603,6 +603,70 @@ def _route_single_booking_cancel(
     return {"reply": reply, "escalated": False}
 
 
+def _route_single_booking_reschedule(
+    *,
+    booking: Booking,
+    session: BookingSession,
+    business: Business,
+    client: Client,
+    channel: str,
+    language: str,
+) -> dict:
+    """Decide between auto-reschedule-with-date-prompt and late escalation.
+
+    Mirrors ``_route_single_booking_cancel`` — same policy threshold
+    ``business.cancellation_policy_hours``. Above the threshold the bot
+    asks the client to pick a new date (handing off into the existing
+    AWAITING_DATE flow with a context marker so AWAITING_CONFIRMATION
+    later calls reschedule_appointment instead of create_appointment).
+    Below the threshold the request is escalated to a human operator.
+    """
+    hours_until = (booking.start_time - timezone.now()).total_seconds() / 3600
+    if hours_until < business.cancellation_policy_hours:
+        handoff_response = request_human_handoff(
+            booking=booking,
+            reason="Late reschedule request",
+            attempts=client.ai_failure_count,
+            language=language,
+        )
+        reply = build_reschedule_late_escalation_reply(booking=booking, language=language)
+        store_message(
+            business_id=business.id,
+            client=client,
+            channel=channel,
+            role=ConversationMessage.Role.ASSISTANT,
+            content=reply,
+        )
+        session.reset()
+        session.save()
+        return {"reply": reply, "escalated": handoff_response["escalated"]}
+
+    # Hand off into the existing AWAITING_DATE flow with a context marker.
+    # set_session_service resets the session and stamps service + state.
+    set_session_service(
+        session,
+        service=booking.service,
+        language=language,
+        source="reschedule_flow",
+    )
+    # Preserve language and source, plus add the reschedule marker.
+    session.context = {
+        **session.context,
+        "reschedule_booking_id": booking.id,
+    }
+    session.save()
+
+    reply = build_reschedule_initiated_reply(booking=booking, language=language)
+    store_message(
+        business_id=business.id,
+        client=client,
+        channel=channel,
+        role=ConversationMessage.Role.ASSISTANT,
+        content=reply,
+    )
+    return {"reply": reply, "escalated": False}
+
+
 def process_incoming_message(
     *,
     business_id: int,
@@ -834,6 +898,75 @@ def process_incoming_message(
             content=reply,
         )
         return {"reply": reply, "escalated": False}
+
+    # === Reschedule choosing: client picked from a numbered list. Hand the
+    # chosen booking to the date-prompt flow. ===
+    if session.state == BookingSession.State.RESCHEDULE_CHOOSING:
+        booking_ids = (
+            session.context.get("reschedule_booking_ids", [])
+            if isinstance(session.context, dict)
+            else []
+        )
+        choice = _parse_cancel_choice(normalized_text)
+        if choice is None or not (1 <= choice <= len(booking_ids)):
+            active_bookings = list(
+                Booking.objects.filter(
+                    pk__in=booking_ids,
+                    client=client,
+                    status__in=[Booking.Status.PENDING, Booking.Status.CONFIRMED],
+                )
+                .select_related("service", "master")
+                .order_by("start_time")
+            )
+            if not active_bookings:
+                session.reset()
+                session.save()
+                reply = build_reschedule_no_active_bookings_reply(language=preferred_language)
+            else:
+                reply = build_reschedule_multiple_bookings_reply(
+                    bookings=active_bookings,
+                    language=preferred_language,
+                )
+            store_message(
+                business_id=business_id,
+                client=client,
+                channel=channel,
+                role=ConversationMessage.Role.ASSISTANT,
+                content=reply,
+            )
+            return {"reply": reply, "escalated": False}
+
+        chosen_id = booking_ids[choice - 1]
+        chosen_booking = (
+            Booking.objects.filter(
+                pk=chosen_id,
+                client=client,
+                business=business,
+                status__in=[Booking.Status.PENDING, Booking.Status.CONFIRMED],
+            )
+            .select_related("service", "master")
+            .first()
+        )
+        if chosen_booking is None:
+            session.reset()
+            session.save()
+            reply = build_reschedule_no_active_bookings_reply(language=preferred_language)
+            store_message(
+                business_id=business_id,
+                client=client,
+                channel=channel,
+                role=ConversationMessage.Role.ASSISTANT,
+                content=reply,
+            )
+            return {"reply": reply, "escalated": False}
+        return _route_single_booking_reschedule(
+            booking=chosen_booking,
+            session=session,
+            business=business,
+            client=client,
+            channel=channel,
+            language=preferred_language,
+        )
 
     if detect_greeting_message(normalized_text):
         clear_booking_session(session)

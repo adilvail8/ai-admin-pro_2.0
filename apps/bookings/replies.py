@@ -210,14 +210,12 @@ def build_reschedule_success_reply(*, booking, language: str) -> str:
         return (
             "✅ Дайын! Жазба ауыстырылды:\n"
             f"📅 {date_label}, {time_label}\n"
-            f"💅 {service_name} — Шебер {master_name}\n"
-            "Бір сағат бұрын еске саламын 😊"
+            f"💅 {service_name} — Шебер {master_name}"
         )
     return (
         "✅ Готово! Запись перенесена:\n"
         f"📅 {date_label} в {time_label}\n"
-        f"💅 {service_name} — Мастер {master_name}\n"
-        "За час напомню 😊"
+        f"💅 {service_name} — Мастер {master_name}"
     )
 
 
