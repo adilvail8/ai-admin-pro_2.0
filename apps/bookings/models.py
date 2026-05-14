@@ -284,6 +284,7 @@ class Booking(TimeStampedModel):
     )
     follow_up_sent_at = models.DateTimeField(null=True, blank=True)
     reminder_sent_at = models.DateTimeField(null=True, blank=True)
+    day_reminder_sent_at = models.DateTimeField(null=True, blank=True)
     notes = models.TextField(blank=True)
 
     objects = BookingQuerySet.as_manager()
