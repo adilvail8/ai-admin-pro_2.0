@@ -314,6 +314,12 @@ def sync_booking_delivery_marker(outbound_message: OutboundMessage):
         booking.reminder_sent_at = delivered_at
         booking.save(update_fields=["reminder_sent_at", "updated_at"])
     elif (
+        outbound_message.message_type == "day_reminder"
+        and booking.day_reminder_sent_at is None
+    ):
+        booking.day_reminder_sent_at = delivered_at
+        booking.save(update_fields=["day_reminder_sent_at", "updated_at"])
+    elif (
         outbound_message.message_type == "follow_up"
         and booking.follow_up_sent_at is None
     ):
@@ -334,6 +340,16 @@ def get_outbound_skip_reason(outbound_message: OutboundMessage) -> str:
             return "reminder_already_delivered"
         if now >= booking.start_time:
             return "booking_start_time_already_passed"
+
+    if outbound_message.message_type == "day_reminder":
+        if booking.status != Booking.Status.CONFIRMED:
+            return "booking_is_not_confirmed"
+        if booking.day_reminder_sent_at is not None:
+            return "day_reminder_already_delivered"
+        # Day reminder is meaningless once we're inside the last 23h —
+        # the hour-reminder will cover that part of the timeline.
+        if now >= booking.start_time - timedelta(hours=23):
+            return "day_reminder_window_passed"
 
     if outbound_message.message_type == "follow_up":
         if booking.status != Booking.Status.PENDING:
@@ -645,7 +661,7 @@ def send_outbound_message(self, outbound_message_id: int):
     retry_backoff=True,
     max_retries=3,
 )
-def send_booking_reminder(self, booking_id: int):
+def send_booking_reminder(self, booking_id: int, stage: str = "hour"):
     with sentry_task_scope(task_name=self.name, booking_id=booking_id):
         booking = (
             Booking.objects.select_related("client", "service", "business")
@@ -663,16 +679,18 @@ def send_booking_reminder(self, booking_id: int):
         )
 
         ai_manager = AIManager(business=booking.business)
-        if not ai_manager.should_send_reminder(booking=booking):
-            return {"booking_id": booking_id, "status": "skipped"}
+        if not ai_manager.should_send_reminder(booking=booking, stage=stage):
+            return {"booking_id": booking_id, "status": "skipped", "stage": stage}
 
+        message_type = "day_reminder" if stage == "day" else "reminder"
+        event_type = "day_reminder_queued" if stage == "day" else "reminder_queued"
         channel = get_client_channel(booking.client)
         outbound_message, created = get_or_create_outbound_message(
             booking=booking,
             channel=channel,
             recipient=get_client_recipient(booking.client, channel),
-            message_type="reminder",
-            text=ai_manager.build_reminder_message(booking=booking),
+            message_type=message_type,
+            text=ai_manager.build_reminder_message(booking=booking, stage=stage),
         )
         set_sentry_tags(
             outbound_message_id=outbound_message.id,
@@ -684,7 +702,7 @@ def send_booking_reminder(self, booking_id: int):
                 extra={
                     "booking_id": booking.id,
                     "outbound_message_id": outbound_message.id,
-                    "message_type": "reminder",
+                    "message_type": message_type,
                 },
             )
             create_audit_log(
@@ -693,9 +711,9 @@ def send_booking_reminder(self, booking_id: int):
                 booking=booking,
                 outbound_message=outbound_message,
                 actor_type="system",
-                event_type="reminder_queued",
+                event_type=event_type,
                 channel=channel,
-                payload={"message_type": "reminder"},
+                payload={"message_type": message_type, "stage": stage},
             )
         else:
             return build_existing_outbound_result(outbound_message)
@@ -784,6 +802,19 @@ def process_pending_reminders():
             )
             .values_list("id", flat=True)
         )
+        # Day reminders fire 23..24 hours before start. The scanner runs
+        # frequently enough (periodic beat) that any qualifying booking
+        # gets caught at least once while inside the 1-hour window.
+        day_reminder_ids = list(
+            Booking.objects.filter(
+                status=Booking.Status.CONFIRMED,
+                day_reminder_sent_at__isnull=True,
+                start_time__lte=now + timedelta(hours=24),
+                start_time__gte=now + timedelta(hours=23),
+                client__is_active=True,
+            )
+            .values_list("id", flat=True)
+        )
         follow_up_ids = list(
             Booking.objects.filter(
                 status=Booking.Status.PENDING,
@@ -796,11 +827,15 @@ def process_pending_reminders():
         )
         set_sentry_tags(
             reminders_queued=len(reminder_ids),
+            day_reminders_queued=len(day_reminder_ids),
             follow_ups_queued=len(follow_up_ids),
         )
 
         for booking_id in reminder_ids:
             send_booking_reminder.delay(booking_id)
+
+        for booking_id in day_reminder_ids:
+            send_booking_reminder.delay(booking_id, stage="day")
 
         for booking_id in follow_up_ids:
             send_follow_up_if_pending.delay(booking_id)
@@ -808,6 +843,7 @@ def process_pending_reminders():
         return {
             "processed_at": now.isoformat(),
             "reminders_queued": len(reminder_ids),
+            "day_reminders_queued": len(day_reminder_ids),
             "follow_ups_queued": len(follow_up_ids),
         }
 
