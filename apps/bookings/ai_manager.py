@@ -38,6 +38,10 @@ DEFAULT_REMINDER_TEMPLATE = (
     "Сәлем! Ждем вас сегодня в {time} на услугу {service_name}. "
     "Если планы изменились, пожалуйста, предупредите нас заранее ✨"
 )
+DEFAULT_DAY_REMINDER_TEMPLATE = (
+    "Сәлем! Завтра ждём вас на {service_name} в {time} 😊 "
+    "Если планы изменятся — напишите, поможем перенести."
+)
 ESCALATION_KEYWORDS = (
     "администратор",
     "оператор",
@@ -532,25 +536,45 @@ class AIManager:
             return False
         return booking.created_at <= timezone.now() - timedelta(hours=1)
 
-    def should_send_reminder(self, *, booking):
+    def should_send_reminder(self, *, booking, stage: str = "hour"):
+        """Return True when a reminder of ``stage`` should be sent.
+
+        ``stage="hour"`` — fires within 2h of start (existing behaviour).
+        ``stage="day"`` — fires in the 23-24h window before start. A
+        booking created less than 24h before start naturally never
+        matches the window — no explicit "created_at" check needed,
+        the time math already filters those out.
+        """
         if booking.status != booking.Status.CONFIRMED:
             return False
+        now = timezone.now()
+        if stage == "day":
+            if booking.day_reminder_sent_at is not None:
+                return False
+            return (
+                booking.start_time - timedelta(hours=24)
+                <= now
+                < booking.start_time - timedelta(hours=23)
+            )
+        # stage == "hour"
         if booking.reminder_sent_at is not None:
             return False
-        now = timezone.now()
         return booking.start_time - timedelta(hours=2) <= now < booking.start_time
 
-    def build_reminder_message(self, *, booking):
+    def build_reminder_message(self, *, booking, stage: str = "hour"):
         local_tz = timezone.get_current_timezone()
         if self.business is not None and self.business.timezone_name:
             local_tz = ZoneInfo(self.business.timezone_name)
         local_start = timezone.localtime(booking.start_time, local_tz)
-        template = DEFAULT_REMINDER_TEMPLATE
+        if stage == "day":
+            default_template = DEFAULT_DAY_REMINDER_TEMPLATE
+            setting_key = "day_reminder_template"
+        else:
+            default_template = DEFAULT_REMINDER_TEMPLATE
+            setting_key = "reminder_template"
+        template = default_template
         if self.business is not None:
-            template = self.business.get_ai_setting(
-                "reminder_template",
-                DEFAULT_REMINDER_TEMPLATE,
-            )
+            template = self.business.get_ai_setting(setting_key, default_template)
         return template.format(
             time=f"{local_start:%H:%M}",
             service_name=booking.service.name,

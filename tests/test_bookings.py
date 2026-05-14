@@ -729,6 +729,104 @@ def test_reschedule_appointment_audit_contains_previous_start_time(
 
 
 @pytest.mark.django_db
+def test_should_send_reminder_hour_window(
+    business,
+    client_profile,
+    master,
+    service,
+):
+    # Booking 1 hour away — inside the 0..2h hour window.
+    booking = Booking.objects.create(
+        business=business, client=client_profile, master=master, service=service,
+        start_time=timezone.now() + timedelta(hours=1),
+        client_data={"name": client_profile.name},
+        status=Booking.Status.CONFIRMED,
+    )
+    ai_manager = AIManager(business=business)
+    assert ai_manager.should_send_reminder(booking=booking, stage="hour") is True
+
+
+@pytest.mark.django_db
+def test_should_send_reminder_day_window(
+    business,
+    client_profile,
+    master,
+    service,
+):
+    # Booking 23.5 hours away — inside the 23..24h day window.
+    booking = Booking.objects.create(
+        business=business, client=client_profile, master=master, service=service,
+        start_time=timezone.now() + timedelta(hours=23, minutes=30),
+        client_data={"name": client_profile.name},
+        status=Booking.Status.CONFIRMED,
+    )
+    ai_manager = AIManager(business=business)
+    assert ai_manager.should_send_reminder(booking=booking, stage="day") is True
+    # Same booking is also too far for the hour-window (1410 minutes away).
+    assert ai_manager.should_send_reminder(booking=booking, stage="hour") is False
+
+
+@pytest.mark.django_db
+def test_should_send_reminder_day_skips_late_created(
+    business,
+    client_profile,
+    master,
+    service,
+):
+    # Booking only 5 hours away — never inside the 23..24h day window.
+    booking = Booking.objects.create(
+        business=business, client=client_profile, master=master, service=service,
+        start_time=timezone.now() + timedelta(hours=5),
+        client_data={"name": client_profile.name},
+        status=Booking.Status.CONFIRMED,
+    )
+    ai_manager = AIManager(business=business)
+    assert ai_manager.should_send_reminder(booking=booking, stage="day") is False
+
+
+@pytest.mark.django_db
+def test_should_send_reminder_day_skipped_when_already_sent(
+    business,
+    client_profile,
+    master,
+    service,
+):
+    booking = Booking.objects.create(
+        business=business, client=client_profile, master=master, service=service,
+        start_time=timezone.now() + timedelta(hours=23, minutes=30),
+        client_data={"name": client_profile.name},
+        status=Booking.Status.CONFIRMED,
+    )
+    # Mark as already sent.
+    Booking.objects.filter(pk=booking.pk).update(
+        day_reminder_sent_at=timezone.now(),
+    )
+    booking.refresh_from_db()
+    ai_manager = AIManager(business=business)
+    assert ai_manager.should_send_reminder(booking=booking, stage="day") is False
+
+
+@pytest.mark.django_db
+def test_build_reminder_message_day_uses_day_template(
+    business,
+    client_profile,
+    master,
+    service,
+):
+    booking = Booking.objects.create(
+        business=business, client=client_profile, master=master, service=service,
+        start_time=timezone.now() + timedelta(hours=23, minutes=30),
+        client_data={"name": client_profile.name},
+        status=Booking.Status.CONFIRMED,
+    )
+    ai_manager = AIManager(business=business)
+    text = ai_manager.build_reminder_message(booking=booking, stage="day")
+    assert "завтра" in text.lower()
+    assert "перенест" in text.lower()  # offers to reschedule
+    assert booking.service.name in text
+
+
+@pytest.mark.django_db
 def test_ai_manager_builds_multi_tenant_prompt(business):
     ai_manager = AIManager(business=business, client=object(), model="test-model")
     messages = ai_manager.build_messages([{"role": "user", "content": "Привет"}])
