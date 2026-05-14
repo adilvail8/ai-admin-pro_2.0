@@ -3402,6 +3402,268 @@ def test_cancellation_choosing_invalid_input_reprompts(
     assert session.state == BookingSession.State.CANCEL_CHOOSING
 
 
+# === Reschedule flow ============================================================
+
+@pytest.mark.django_db
+def test_reschedule_no_active_bookings_reply(
+    business,
+    client_profile,
+    monkeypatch,
+):
+    _stub_notify_human_operator(monkeypatch)
+
+    response = handle_text_message(
+        business_id=business.id,
+        channel=ConversationMessage.Channel.WHATSAPP,
+        client=client_profile,
+        text="Хочу перенести запись",
+    )
+
+    assert response["escalated"] is False
+    assert "нет активных записей" in response["reply"].lower()
+
+
+@pytest.mark.django_db
+def test_reschedule_single_booking_late_escalates(
+    business,
+    client_profile,
+    master,
+    service,
+    monkeypatch,
+):
+    # Booking starts in 30 minutes — well under default cancellation_policy_hours=2.
+    booking = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(minutes=30),
+        status=Booking.Status.CONFIRMED,
+        client_data={"name": client_profile.name},
+    )
+    captured = _stub_notify_human_operator(monkeypatch)
+
+    response = handle_text_message(
+        business_id=business.id,
+        channel=ConversationMessage.Channel.WHATSAPP,
+        client=client_profile,
+        text="Хочу перенести запись",
+    )
+
+    assert response["escalated"] is True
+    assert captured["booking_id"] == booking.id
+    assert "администратор" in response["reply"].lower()
+    booking.refresh_from_db()
+    assert booking.status == Booking.Status.CONFIRMED  # not modified
+    # Session reset — no marker should leak forward.
+    session = BookingSession.objects.get(
+        business=business, client=client_profile,
+        channel=ConversationMessage.Channel.WHATSAPP,
+    )
+    assert session.state == BookingSession.State.IDLE
+    assert "reschedule_booking_id" not in (session.context or {})
+
+
+@pytest.mark.django_db
+def test_reschedule_single_booking_initiates_date_flow(
+    business,
+    client_profile,
+    master,
+    service,
+    monkeypatch,
+):
+    booking = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(days=2),
+        status=Booking.Status.CONFIRMED,
+        client_data={"name": client_profile.name},
+    )
+    _stub_notify_human_operator(monkeypatch)
+
+    response = handle_text_message(
+        business_id=business.id,
+        channel=ConversationMessage.Channel.WHATSAPP,
+        client=client_profile,
+        text="Хочу перенест на другое время",
+    )
+
+    assert response["escalated"] is False
+    assert "перенесём" in response["reply"].lower() or "перенесем" in response["reply"].lower()
+
+    session = BookingSession.objects.get(
+        business=business, client=client_profile,
+        channel=ConversationMessage.Channel.WHATSAPP,
+    )
+    assert session.state == BookingSession.State.AWAITING_DATE
+    assert session.service_id == service.id
+    assert session.context["reschedule_booking_id"] == booking.id
+
+
+@pytest.mark.django_db
+def test_reschedule_multiple_bookings_shows_list(
+    business,
+    client_profile,
+    master,
+    service,
+    monkeypatch,
+):
+    a = Booking.objects.create(
+        business=business, client=client_profile, master=master, service=service,
+        start_time=timezone.now() + timedelta(days=2),
+        status=Booking.Status.CONFIRMED,
+        client_data={"name": client_profile.name},
+    )
+    b = Booking.objects.create(
+        business=business, client=client_profile, master=master, service=service,
+        start_time=timezone.now() + timedelta(days=5),
+        status=Booking.Status.CONFIRMED,
+        client_data={"name": client_profile.name},
+    )
+    _stub_notify_human_operator(monkeypatch)
+
+    response = handle_text_message(
+        business_id=business.id,
+        channel=ConversationMessage.Channel.WHATSAPP,
+        client=client_profile,
+        text="Можно перенести запись",
+    )
+
+    assert "1." in response["reply"]
+    assert "2." in response["reply"]
+    session = BookingSession.objects.get(
+        business=business, client=client_profile,
+        channel=ConversationMessage.Channel.WHATSAPP,
+    )
+    assert session.state == BookingSession.State.RESCHEDULE_CHOOSING
+    assert session.context["reschedule_booking_ids"] == [a.id, b.id]
+
+
+@pytest.mark.django_db
+def test_reschedule_choosing_then_confirms_and_reschedules(
+    business,
+    client_profile,
+    master,
+    service,
+    monkeypatch,
+):
+    a = Booking.objects.create(
+        business=business, client=client_profile, master=master, service=service,
+        start_time=timezone.now() + timedelta(days=2),
+        status=Booking.Status.CONFIRMED,
+        client_data={"name": client_profile.name},
+    )
+    b = Booking.objects.create(
+        business=business, client=client_profile, master=master, service=service,
+        start_time=timezone.now() + timedelta(days=5),
+        status=Booking.Status.CONFIRMED,
+        client_data={"name": client_profile.name},
+    )
+    _stub_notify_human_operator(monkeypatch)
+
+    # Turn 1: enter RESCHEDULE_CHOOSING
+    handle_text_message(
+        business_id=business.id,
+        channel=ConversationMessage.Channel.WHATSAPP,
+        client=client_profile,
+        text="Хочу перенести",
+    )
+
+    # Turn 2: pick booking #2 → enter AWAITING_DATE with marker
+    handle_text_message(
+        business_id=business.id,
+        channel=ConversationMessage.Channel.WHATSAPP,
+        client=client_profile,
+        text="2",
+    )
+    session = BookingSession.objects.get(
+        business=business, client=client_profile,
+        channel=ConversationMessage.Channel.WHATSAPP,
+    )
+    assert session.state == BookingSession.State.AWAITING_DATE
+    assert session.context["reschedule_booking_id"] == b.id
+
+    # Skip date/slot picking — those are covered by existing booking-flow tests.
+    # Manually drive the session to AWAITING_CONFIRMATION with the new slot,
+    # then verify the confirmation handler invokes reschedule_appointment.
+    new_start = timezone.now() + timedelta(days=10, hours=14)
+    new_end = new_start + service.duration + service.buffer_time
+    session.state = BookingSession.State.AWAITING_CONFIRMATION
+    session.master = master
+    session.selected_start_time = new_start
+    session.selected_end_time = new_end
+    session.save()
+
+    # Turn 3: "да" → reschedule_appointment runs
+    response = handle_text_message(
+        business_id=business.id,
+        channel=ConversationMessage.Channel.WHATSAPP,
+        client=client_profile,
+        text="да",
+    )
+    assert "перенесена" in response["reply"].lower()
+
+    b.refresh_from_db()
+    assert b.status == Booking.Status.CONFIRMED  # not cancelled, just moved
+    # start_time changed (allow for sub-second drift on save).
+    assert abs((b.start_time - new_start).total_seconds()) < 2
+
+    # Booking #1 stays put.
+    a.refresh_from_db()
+    assert a.status == Booking.Status.CONFIRMED
+
+    # Session reset after success — marker gone.
+    session.refresh_from_db()
+    assert session.state == BookingSession.State.IDLE
+    assert "reschedule_booking_id" not in (session.context or {})
+
+
+@pytest.mark.django_db
+def test_reschedule_idle_guard_during_date_flow(
+    business,
+    client_profile,
+    service,
+    monkeypatch,
+):
+    """When the client is mid-booking-creation (AWAITING_DATE) and says
+    'другой день' / 'другое время', that's part of the date-picking
+    conversation — must NOT be hijacked by the reschedule intent.
+    """
+    monkeypatch.setattr(
+        "apps.bookings.ai_manager.AIManager.generate_reply",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("AI should not be called")),
+    )
+
+    session = get_or_create_booking_session(
+        business=business,
+        client=client_profile,
+        channel=ConversationMessage.Channel.TELEGRAM,
+    )
+    set_session_service(session, service=service, language="ru")
+    # Sanity — we are in AWAITING_DATE before sending the reschedule-keyword.
+    assert session.state == BookingSession.State.AWAITING_DATE
+
+    response = handle_text_message(
+        business_id=business.id,
+        channel=ConversationMessage.Channel.TELEGRAM,
+        client=client_profile,
+        text="Можно на другой день?",
+    )
+
+    session.refresh_from_db()
+    # Did NOT slip into reschedule entry — still in AWAITING_DATE handling.
+    assert session.state == BookingSession.State.AWAITING_DATE
+    # And not in RESCHEDULE_CHOOSING.
+    assert session.state != BookingSession.State.RESCHEDULE_CHOOSING
+    # Reply is the date prompt, not the reschedule no-active-bookings reply.
+    assert "нет активных записей" not in response["reply"].lower()
+
+
+# === End reschedule flow ========================================================
+
+
 @pytest.mark.django_db
 def test_handle_text_message_offers_real_slots_after_affirming_tomorrow(
     business,

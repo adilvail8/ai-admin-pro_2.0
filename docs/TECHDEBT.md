@@ -91,6 +91,42 @@ The bot now self-cancels future bookings when the start is at least
 escalates to the operator only when it's too late. No more "promise
 without action".
 
+**2026-05-15 — Billing analytics + Reschedule flow:**
+
+_Billing instrumentation + admin dashboard:_
+- `prompt_tokens` / `completion_tokens` captured on every AI call,
+  including the tool-call follow-up roundtrip — `575b938`
+- 30-day cost summary card on `AIInteractionLog` admin changelist
+  (totals + per-business breakdown for super_admin) with current
+  gpt-4o-mini pricing in tenge — `2157246`
+
+_Reschedule flow (full):_
+- Overlap-check + `previous_start_time` in audit payload on the
+  `reschedule_appointment` service helper — `abffae2`
+- `detect_reschedule_request` keyword detector with explicit
+  disjoint check against cancellation keywords — `2969dcc`
+- 4 reschedule reply builders (no_active / multi / late_escalation /
+  initiated) — `7fa28ee`
+- `RESCHEDULE_CHOOSING` state + migration `0017` +
+  `build_reschedule_success_reply` — `227c46e`
+- Continuation handler + `_route_single_booking_reschedule` routing
+  helper (mirrors cancellation pattern) — `3de5ba0`
+- Entry block in `process_incoming_message` (IDLE-guarded to avoid
+  hijacking mid-flow date-picking phrases like "другой день") +
+  `AWAITING_CONFIRMATION` branching that dispatches to
+  `reschedule_appointment` when `session.context` carries the
+  `reschedule_booking_id` marker — `7d7b50c`
+- 6 integration tests covering no-active / late / single-init /
+  multi-list / full multi-turn happy path / IDLE-guard regression
+  protection — this commit.
+
+The bot now moves bookings to a new slot end-to-end. Same
+`Business.cancellation_policy_hours` policy applies (one knob, one
+mental model for the owner). Old slot is freed via in-place
+`start_time` mutation; new slot is occupied. Audit log carries
+`previous_start_time` so the move history is recoverable without
+extra Booking fields.
+
 ---
 
 ## Не покрыто ревизией (на будущее)

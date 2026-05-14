@@ -1161,6 +1161,7 @@ def process_incoming_message(
         and inferred_service is None
         and explicit_booking_intent
         and not detect_cancellation_request(normalized_text)
+        and not detect_reschedule_request(normalized_text)
     ):
         reply = build_booking_intent_clarification_reply(language=preferred_language)
         store_message(
