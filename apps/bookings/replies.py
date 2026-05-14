@@ -199,6 +199,28 @@ def build_reschedule_late_escalation_reply(*, booking, language: str) -> str:
     )
 
 
+def build_reschedule_success_reply(*, booking, language: str) -> str:
+    """Confirmation that a booking has been moved to the new slot."""
+    service_name = localize_service_name(booking.service.name, language)
+    local_start = timezone.localtime(booking.start_time)
+    date_label = format_local_date(local_start.date(), language=language)
+    time_label = f"{local_start:%H:%M}"
+    master_name = booking.master.full_name
+    if language == "kz":
+        return (
+            "✅ Дайын! Жазба ауыстырылды:\n"
+            f"📅 {date_label}, {time_label}\n"
+            f"💅 {service_name} — Шебер {master_name}\n"
+            "Бір сағат бұрын еске саламын 😊"
+        )
+    return (
+        "✅ Готово! Запись перенесена:\n"
+        f"📅 {date_label} в {time_label}\n"
+        f"💅 {service_name} — Мастер {master_name}\n"
+        "За час напомню 😊"
+    )
+
+
 def build_reschedule_initiated_reply(*, booking, language: str) -> str:
     """Bot has accepted the reschedule request for a specific booking and is
     asking the client which new date works.

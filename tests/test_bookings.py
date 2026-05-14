@@ -125,6 +125,7 @@ from apps.bookings.webhooks import (
     build_reschedule_late_escalation_reply,
     build_reschedule_multiple_bookings_reply,
     build_reschedule_no_active_bookings_reply,
+    build_reschedule_success_reply,
     get_client_active_bookings,
     build_date_selection_reply,
     build_existing_booking_reply,
@@ -4966,6 +4967,30 @@ def test_build_reschedule_multiple_bookings_reply_lists_each_booking(
     assert "1." in reply
     assert "2." in reply
     assert "haircut" in reply.lower()  # fixture service name falls through
+
+
+@pytest.mark.django_db
+def test_build_reschedule_success_reply_shows_new_slot_and_master(
+    business,
+    client_profile,
+    master,
+    service,
+):
+    booking = Booking.objects.create(
+        business=business, client=client_profile, master=master, service=service,
+        start_time=timezone.now() + timedelta(days=3, hours=14),
+        client_data={"name": client_profile.name},
+        status=Booking.Status.CONFIRMED,
+    )
+
+    ru_reply = build_reschedule_success_reply(booking=booking, language="ru")
+    kz_reply = build_reschedule_success_reply(booking=booking, language="kz")
+
+    assert "перенесена" in ru_reply.lower()
+    assert "haircut" in ru_reply.lower()  # fixture service name falls through
+    assert master.full_name in ru_reply
+    assert "ауыстырылды" in kz_reply.lower()
+    assert master.full_name in kz_reply
 
 
 @pytest.mark.django_db

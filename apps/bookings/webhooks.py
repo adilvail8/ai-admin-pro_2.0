@@ -55,6 +55,7 @@ from .replies import (
     build_reschedule_late_escalation_reply,
     build_reschedule_multiple_bookings_reply,
     build_reschedule_no_active_bookings_reply,
+    build_reschedule_success_reply,
     build_service_catalog_reply,
     build_service_master_options_reply,
     build_service_price_reply,
