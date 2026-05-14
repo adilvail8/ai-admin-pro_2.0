@@ -104,6 +104,7 @@ from apps.bookings.tasks import (
     send_booking_reminder,
     send_outbound_message,
     send_follow_up_if_pending,
+    sync_booking_delivery_marker,
 )
 from apps.bookings.transports import (
     InternalAlertTransport,
@@ -7116,6 +7117,153 @@ def test_process_pending_reminders_queues_due_tasks(
     assert result["follow_ups_queued"] == 1
     assert reminder_booking.id in queued_calls
     assert follow_up_booking.id in queued_calls
+
+
+@pytest.mark.django_db
+def test_process_pending_reminders_queues_day_reminder(
+    business,
+    client_profile,
+    master,
+    service,
+    monkeypatch,
+):
+    """Booking 23.5h ahead lands in the 23..24h window → day-reminder queued."""
+    day_booking = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(hours=23, minutes=30),
+        client_data={"name": client_profile.name},
+        status=Booking.Status.CONFIRMED,
+    )
+
+    queued_calls = []
+
+    def fake_delay(*args, **kwargs):
+        queued_calls.append((args, kwargs))
+
+    monkeypatch.setattr(
+        "apps.bookings.tasks.send_booking_reminder.delay",
+        fake_delay,
+    )
+    monkeypatch.setattr(
+        "apps.bookings.tasks.send_follow_up_if_pending.delay",
+        fake_delay,
+    )
+
+    result = process_pending_reminders()
+
+    assert result["day_reminders_queued"] == 1
+    assert result["reminders_queued"] == 0  # 23.5h away — outside the hour window
+    # send_booking_reminder.delay was invoked with this booking_id and stage="day".
+    matching = [
+        c for c in queued_calls
+        if c[0] == (day_booking.id,) and c[1].get("stage") == "day"
+    ]
+    assert len(matching) == 1, queued_calls
+
+
+@pytest.mark.django_db
+def test_process_pending_reminders_skips_recent_booking(
+    business,
+    client_profile,
+    master,
+    service,
+    monkeypatch,
+):
+    """A booking created < 24h before start_time never enters the
+    day-reminder window — scanner should not queue anything for it."""
+    Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(hours=5),  # too close
+        client_data={"name": client_profile.name},
+        status=Booking.Status.CONFIRMED,
+    )
+
+    queued_calls = []
+
+    def fake_delay(*args, **kwargs):
+        queued_calls.append((args, kwargs))
+
+    monkeypatch.setattr(
+        "apps.bookings.tasks.send_booking_reminder.delay",
+        fake_delay,
+    )
+    monkeypatch.setattr(
+        "apps.bookings.tasks.send_follow_up_if_pending.delay",
+        fake_delay,
+    )
+
+    result = process_pending_reminders()
+
+    assert result["day_reminders_queued"] == 0
+    day_calls = [c for c in queued_calls if c[1].get("stage") == "day"]
+    assert day_calls == []
+
+
+@pytest.mark.django_db
+def test_send_booking_reminder_day_sets_correct_field(
+    business,
+    client_profile,
+    master,
+    service,
+    monkeypatch,
+):
+    """End-to-end: send_booking_reminder(stage='day') → OutboundMessage
+    with message_type='day_reminder' → marking it DELIVERED + running
+    sync_booking_delivery_marker stamps day_reminder_sent_at (not the
+    hour-reminder field)."""
+    monkeypatch.setattr(
+        "apps.bookings.tasks.get_transport_for_channel",
+        lambda channel: AcceptingTransport(),
+    )
+    booking = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(hours=23, minutes=30),
+        client_data={"name": client_profile.name},
+        status=Booking.Status.CONFIRMED,
+    )
+
+    result = send_booking_reminder.run(booking.id, stage="day")
+    assert result["status"] == OutboundMessage.Status.SUBMITTED
+
+    outbound = OutboundMessage.objects.get(
+        booking=booking, message_type="day_reminder",
+    )
+    # No "reminder" outbound for the hour stage was created.
+    assert not OutboundMessage.objects.filter(
+        booking=booking, message_type="reminder",
+    ).exists()
+
+    # AcceptingTransport reports accepted=True, delivered=False → field
+    # not set yet. Promote the message to DELIVERED manually and run
+    # the sync to verify wiring.
+    booking.refresh_from_db()
+    assert booking.day_reminder_sent_at is None  # not delivered yet
+
+    outbound.status = OutboundMessage.Status.DELIVERED
+    outbound.delivered_at = timezone.now()
+    outbound.save(update_fields=["status", "delivered_at", "updated_at"])
+    sync_booking_delivery_marker(outbound)
+
+    booking.refresh_from_db()
+    assert booking.day_reminder_sent_at is not None
+    # Hour-reminder field stays untouched — the two stages are independent.
+    assert booking.reminder_sent_at is None
+
+    # Audit captures the new event type with stage payload.
+    audit = AuditLog.objects.filter(
+        outbound_message=outbound, event_type="day_reminder_queued",
+    ).order_by("-created_at").first()
+    assert audit is not None
+    assert audit.payload.get("stage") == "day"
 
 
 @pytest.mark.django_db

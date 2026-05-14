@@ -127,6 +127,37 @@ mental model for the owner). Old slot is freed via in-place
 `previous_start_time` so the move history is recoverable without
 extra Booking fields.
 
+**2026-05-15 — Two-tier reminders:**
+
+- `Booking.day_reminder_sent_at` field + migration `0018` — `a706a56`
+- `AIManager.should_send_reminder` and `build_reminder_message` gain a
+  `stage` parameter ("hour" / "day") with a tomorrow-notice template
+  for the day stage. The day-window is 23..24h before start — a
+  booking created less than 24h before start naturally never matches
+  the window, so no separate `created_at` check is needed — `590215d`
+- `send_booking_reminder` accepts `stage`, uses `message_type="day_reminder"`
+  + audit event `day_reminder_queued`. `process_pending_reminders` runs
+  a second scan for the day window and queues `.delay(id, stage="day")`.
+  `sync_booking_delivery_marker` now also stamps `day_reminder_sent_at`
+  on delivery, and `get_outbound_skip_reason` recognises the new
+  message_type so a stuck retry never fires a day-reminder at hour
+  time — `068443a`
+- Restored "За час напомню 😊" in `build_booking_created_reply` and
+  `build_reschedule_success_reply`. The promise was removed earlier
+  because the day-reminder side was missing; with both stages wired
+  up, the bot actually delivers what it advertises. Cancellation
+  success deliberately stays without the line — a cancelled booking
+  has nothing to remind about — `47d4da6`
+- 3 integration tests: scanner queues day-reminder for a 23.5h-ahead
+  booking, scanner skips a 5h-ahead booking, full send-then-deliver
+  cycle stamps the right field and leaves the other untouched —
+  this commit.
+
+The bot's reminder pipeline is now two-tier: day-before notice 23..24h
+before start, hour-before reminder ~2h before start, both idempotent
+through their own `*_sent_at` fields. Templates per-business override
+via `ai_settings["reminder_template"]` / `["day_reminder_template"]`.
+
 ---
 
 ## Не покрыто ревизией (на будущее)
