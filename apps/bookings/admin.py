@@ -38,6 +38,7 @@ from .models import (
     Service,
 )
 from .services import update_booking_status
+from .widgets import WorkingHoursWidget
 from .tasks import (
     dispatch_outbound_delivery,
     get_client_channel,
@@ -1033,8 +1034,27 @@ class CategoryAdmin(TenantScopedAdminMixin, ModelAdmin):
         return obj.is_active
 
 
+DEFAULT_NEW_MASTER_WORKING_HOURS = {
+    "mon": {"start": "09:00", "end": "18:00"},
+    "tue": {"start": "09:00", "end": "18:00"},
+    "wed": {"start": "09:00", "end": "18:00"},
+    "thu": {"start": "09:00", "end": "18:00"},
+    "fri": {"start": "09:00", "end": "18:00"},
+}
+
+
+class MasterForm(forms.ModelForm):
+    class Meta:
+        model = Master
+        fields = "__all__"
+        widgets = {
+            "working_hours": WorkingHoursWidget(),
+        }
+
+
 @admin.register(Master)
 class MasterAdmin(TenantScopedAdminMixin, ModelAdmin):
+    form = MasterForm
     list_display = ("full_name", "business", "specialization", "colored_active")
     list_filter = ("business", "is_active")
     search_fields = ("full_name", "specialization")
@@ -1042,6 +1062,11 @@ class MasterAdmin(TenantScopedAdminMixin, ModelAdmin):
     @display(description="Активен", label={True: "success", False: "danger"})
     def colored_active(self, obj):
         return obj.is_active
+
+    def get_changeform_initial_data(self, request):
+        initial = super().get_changeform_initial_data(request)
+        initial.setdefault("working_hours", DEFAULT_NEW_MASTER_WORKING_HOURS)
+        return initial
 
 
 @admin.register(Service)
