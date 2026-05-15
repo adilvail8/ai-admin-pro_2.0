@@ -147,6 +147,65 @@ class Master(TimeStampedModel):
         )
 
 
+class MasterUnavailability(TimeStampedModel):
+    business = models.ForeignKey(
+        Business,
+        on_delete=models.CASCADE,
+        related_name="master_unavailabilities",
+    )
+    master = models.ForeignKey(
+        Master,
+        on_delete=models.CASCADE,
+        related_name="unavailabilities",
+    )
+    start_time = models.DateTimeField()
+    end_time = models.DateTimeField()
+    reason = models.CharField(max_length=255, blank=True, default="")
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ("start_time", "master__full_name")
+        verbose_name = _("master unavailability")
+        verbose_name_plural = _("master unavailabilities")
+        indexes = [
+            models.Index(fields=("business", "start_time", "end_time")),
+            models.Index(fields=("master", "start_time", "end_time")),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(end_time__gt=F("start_time")),
+                name="master_unavailability_end_after_start",
+            ),
+        ]
+
+    def __str__(self):
+        local_start = timezone.localtime(self.start_time)
+        return f"{self.master.full_name} unavailable {local_start:%Y-%m-%d %H:%M}"
+
+    def clean(self):
+        super().clean()
+        if self.master_id and self.business_id != self.master.business_id:
+            raise ValidationError(
+                {"master": _("Master must belong to the selected business.")}
+            )
+        if self.start_time and timezone.is_naive(self.start_time):
+            raise ValidationError(
+                {"start_time": _("start_time must be timezone-aware.")}
+            )
+        if self.end_time and timezone.is_naive(self.end_time):
+            raise ValidationError(
+                {"end_time": _("end_time must be timezone-aware.")}
+            )
+        if self.start_time and self.end_time and self.end_time <= self.start_time:
+            raise ValidationError(
+                {"end_time": _("end_time must be after start_time.")}
+            )
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
 class Category(TimeStampedModel):
     business = models.ForeignKey(
         Business,
