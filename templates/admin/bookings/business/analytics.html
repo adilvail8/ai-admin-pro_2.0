@@ -42,9 +42,26 @@
       </div>
     {% endif %}
 
-    <div class="analytics-content" style="background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 40px; text-align: center; color: #6b7280;">
-      KPI и разбивки появятся в следующем шаге.
-      Текущий выбор: <strong>{{ selected_period }}</strong>.
+    {# KPI cards #}
+    <div class="analytics-kpi-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 24px;">
+      {% for card in kpi_cards %}
+        <div class="analytics-kpi-card" style="background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 18px;
+            border-left: 4px solid {% if card.tone == 'green' %}#10b981{% elif card.tone == 'red' %}#ef4444{% elif card.tone == 'amber' %}#f59e0b{% else %}#6b7280{% endif %};">
+          <div style="font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px;">
+            {{ card.label }}
+          </div>
+          <div style="font-size: 28px; font-weight: 600; color: #111827; line-height: 1.2;">
+            {{ card.value }}
+          </div>
+          <div style="font-size: 12px; color: #9ca3af; margin-top: 4px;">
+            {{ card.subtitle }}
+          </div>
+        </div>
+      {% endfor %}
+    </div>
+
+    <div class="analytics-content" style="background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 24px; text-align: center; color: #6b7280; font-size: 13px;">
+      Разбивки по услугам, мастерам и каналам — в следующих шагах.
     </div>
   </div>
 {% endblock %}

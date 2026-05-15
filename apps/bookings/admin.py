@@ -842,6 +842,61 @@ class BusinessAdmin(TenantScopedAdminMixin, ModelAdmin):
         if business_ids is not None:
             businesses = businesses.filter(pk__in=business_ids)
 
+        # Period window anchored on Booking.start_time — "когда происходит запись"
+        # is more product-meaningful for an owner than "когда её создали". For the
+        # "today" tab we keep the whole day so upcoming hours stay visible.
+        now = timezone.now()
+        today = timezone.localdate()
+        if period == "today":
+            period_filter = Q(start_time__date=today)
+        elif period == "7d":
+            period_filter = Q(start_time__gte=now - timedelta(days=7), start_time__lte=now)
+        else:
+            period_filter = Q(start_time__gte=now - timedelta(days=30), start_time__lte=now)
+
+        bookings_qs = (
+            Booking.objects.filter(business__in=businesses)
+            .filter(period_filter)
+        )
+        total_bookings = bookings_qs.count()
+        confirmed_count = bookings_qs.filter(status=Booking.Status.CONFIRMED).count()
+        cancelled_count = bookings_qs.filter(status=Booking.Status.CANCELLED).count()
+        revenue = (
+            bookings_qs.filter(status=Booking.Status.CONFIRMED)
+            .aggregate(total=Sum("service__price"))["total"]
+            or 0
+        )
+
+        def pct(numer, denom):
+            return round((numer / denom) * 100) if denom else 0
+
+        kpi_cards = [
+            {
+                "label": "Всего записей",
+                "value": total_bookings,
+                "subtitle": "за период",
+                "tone": "neutral",
+            },
+            {
+                "label": "Подтверждено",
+                "value": f"{pct(confirmed_count, total_bookings)}%",
+                "subtitle": f"{confirmed_count} из {total_bookings}",
+                "tone": "green",
+            },
+            {
+                "label": "Отменено",
+                "value": f"{pct(cancelled_count, total_bookings)}%",
+                "subtitle": f"{cancelled_count} из {total_bookings}",
+                "tone": "red",
+            },
+            {
+                "label": "Выручка",
+                "value": f"{int(revenue):,} ₸".replace(",", " "),
+                "subtitle": "по подтверждённым",
+                "tone": "amber",
+            },
+        ]
+
         context = {
             **self.admin_site.each_context(request),
             "title": "Аналитика салона",
@@ -853,6 +908,7 @@ class BusinessAdmin(TenantScopedAdminMixin, ModelAdmin):
                 ("30d", "30 дней"),
             ],
             "businesses": list(businesses),
+            "kpi_cards": kpi_cards,
         }
         return TemplateResponse(
             request,
