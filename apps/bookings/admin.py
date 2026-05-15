@@ -897,6 +897,64 @@ class BusinessAdmin(TenantScopedAdminMixin, ModelAdmin):
             },
         ]
 
+        # Top services — by booking count, with summed revenue. Sum on
+        # service__price effectively multiplies by row count (price is
+        # constant per service join), giving total revenue.
+        top_services = list(
+            bookings_qs.values("service__name")
+            .annotate(
+                count=Count("id"),
+                revenue=Sum("service__price"),
+            )
+            .order_by("-count")[:5]
+        )
+        for row in top_services:
+            row["revenue"] = int(row["revenue"] or 0)
+
+        # Master workload — totals + how many became CONFIRMED. Helps the
+        # owner spot a master with high traffic but low conversion.
+        master_workload = list(
+            bookings_qs.values("master__full_name")
+            .annotate(
+                count=Count("id"),
+                confirmed=Count(
+                    "id", filter=Q(status=Booking.Status.CONFIRMED)
+                ),
+            )
+            .order_by("-count")[:5]
+        )
+
+        # Channel breakdown — messages from clients (USER role) per channel.
+        # Anchored on created_at because messages don't have a future date.
+        if period == "today":
+            messages_filter = Q(created_at__date=today)
+        elif period == "7d":
+            messages_filter = Q(
+                created_at__gte=now - timedelta(days=7),
+                created_at__lte=now,
+            )
+        else:
+            messages_filter = Q(
+                created_at__gte=now - timedelta(days=30),
+                created_at__lte=now,
+            )
+        channel_breakdown = list(
+            ConversationMessage.objects.filter(
+                business__in=businesses,
+                role=ConversationMessage.Role.USER,
+            )
+            .filter(messages_filter)
+            .values("channel")
+            .annotate(count=Count("id"))
+            .order_by("-count")
+        )
+        # Pretty-print channel labels for display.
+        channel_labels = dict(ConversationMessage.Channel.choices)
+        for row in channel_breakdown:
+            row["channel_label"] = channel_labels.get(
+                row["channel"], row["channel"]
+            )
+
         context = {
             **self.admin_site.each_context(request),
             "title": "Аналитика салона",
@@ -909,6 +967,9 @@ class BusinessAdmin(TenantScopedAdminMixin, ModelAdmin):
             ],
             "businesses": list(businesses),
             "kpi_cards": kpi_cards,
+            "top_services": top_services,
+            "master_workload": master_workload,
+            "channel_breakdown": channel_breakdown,
         }
         return TemplateResponse(
             request,

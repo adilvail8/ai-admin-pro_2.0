@@ -60,8 +60,93 @@
       {% endfor %}
     </div>
 
-    <div class="analytics-content" style="background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 24px; text-align: center; color: #6b7280; font-size: 13px;">
-      Разбивки по услугам, мастерам и каналам — в следующих шагах.
+    {# Breakdowns: top services / master workload / channels #}
+    <div class="analytics-breakdowns" style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px;">
+
+      {# Top services #}
+      <div style="background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px;">
+        <div style="font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 10px;">
+          Топ услуг
+        </div>
+        {% if top_services %}
+          <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+            <thead>
+              <tr style="border-bottom: 1px solid #e5e7eb; text-align: left;">
+                <th style="padding: 6px 4px; font-weight: 500; color: #6b7280;">Услуга</th>
+                <th style="padding: 6px 4px; font-weight: 500; color: #6b7280; text-align: right;">Записей</th>
+                <th style="padding: 6px 4px; font-weight: 500; color: #6b7280; text-align: right;">Выручка ₸</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in top_services %}
+                <tr style="border-bottom: 1px solid #f3f4f6;">
+                  <td style="padding: 6px 4px;">{{ row.service__name }}</td>
+                  <td style="padding: 6px 4px; text-align: right;">{{ row.count }}</td>
+                  <td style="padding: 6px 4px; text-align: right; font-weight: 500;">{{ row.revenue }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% else %}
+          <div style="color: #9ca3af; font-size: 13px;">Нет данных за период.</div>
+        {% endif %}
+      </div>
+
+      {# Master workload #}
+      <div style="background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px;">
+        <div style="font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 10px;">
+          Загрузка мастеров
+        </div>
+        {% if master_workload %}
+          <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+            <thead>
+              <tr style="border-bottom: 1px solid #e5e7eb; text-align: left;">
+                <th style="padding: 6px 4px; font-weight: 500; color: #6b7280;">Мастер</th>
+                <th style="padding: 6px 4px; font-weight: 500; color: #6b7280; text-align: right;">Всего</th>
+                <th style="padding: 6px 4px; font-weight: 500; color: #6b7280; text-align: right;">Подтв.</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in master_workload %}
+                <tr style="border-bottom: 1px solid #f3f4f6;">
+                  <td style="padding: 6px 4px;">{{ row.master__full_name|default:"—" }}</td>
+                  <td style="padding: 6px 4px; text-align: right;">{{ row.count }}</td>
+                  <td style="padding: 6px 4px; text-align: right; color: #059669; font-weight: 500;">{{ row.confirmed }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% else %}
+          <div style="color: #9ca3af; font-size: 13px;">Нет данных за период.</div>
+        {% endif %}
+      </div>
+    </div>
+
+    {# Channel breakdown — full width #}
+    <div style="background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; margin-bottom: 24px;">
+      <div style="font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 10px;">
+        Каналы (входящие сообщения клиентов)
+      </div>
+      {% if channel_breakdown %}
+        <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+          <thead>
+            <tr style="border-bottom: 1px solid #e5e7eb; text-align: left;">
+              <th style="padding: 6px 4px; font-weight: 500; color: #6b7280;">Канал</th>
+              <th style="padding: 6px 4px; font-weight: 500; color: #6b7280; text-align: right;">Сообщений</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in channel_breakdown %}
+              <tr style="border-bottom: 1px solid #f3f4f6;">
+                <td style="padding: 6px 4px;">{{ row.channel_label }}</td>
+                <td style="padding: 6px 4px; text-align: right; font-weight: 500;">{{ row.count }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <div style="color: #9ca3af; font-size: 13px;">Нет входящих сообщений за период.</div>
+      {% endif %}
     </div>
   </div>
 {% endblock %}
