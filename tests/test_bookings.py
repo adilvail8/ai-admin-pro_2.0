@@ -396,6 +396,66 @@ def test_booking_rejects_overlap_with_buffer(
 
 
 @pytest.mark.django_db
+def test_booking_rejects_master_unavailability_overlap(
+    business,
+    client_profile,
+    master,
+    service,
+):
+    start_time = timezone.now() + timedelta(days=1)
+    MasterUnavailability.objects.create(
+        business=business,
+        master=master,
+        start_time=start_time + timedelta(minutes=30),
+        end_time=start_time + timedelta(minutes=90),
+        reason="Day off",
+    )
+
+    booking = Booking(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=start_time,
+        client_data={"name": "Maria"},
+        status=Booking.Status.PENDING,
+    )
+
+    with pytest.raises(ValidationError, match="master unavailability"):
+        booking.full_clean()
+
+
+@pytest.mark.django_db
+def test_booking_ignores_inactive_master_unavailability(
+    business,
+    client_profile,
+    master,
+    service,
+):
+    start_time = timezone.now() + timedelta(days=1)
+    MasterUnavailability.objects.create(
+        business=business,
+        master=master,
+        start_time=start_time + timedelta(minutes=30),
+        end_time=start_time + timedelta(minutes=90),
+        reason="Cancelled day off",
+        is_active=False,
+    )
+
+    booking = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=start_time,
+        client_data={"name": "Maria"},
+        status=Booking.Status.CONFIRMED,
+    )
+
+    assert booking.pk is not None
+
+
+@pytest.mark.django_db
 def test_get_available_slots_respects_buffer_time(
     business,
     client_profile,

@@ -393,6 +393,11 @@ class Booking(TimeStampedModel):
                 _("Selected time slot overlaps with another booking.")
             )
 
+        if self.has_master_unavailability_overlap():
+            raise ValidationError(
+                _("Selected time slot overlaps with master unavailability.")
+            )
+
     def save(self, *args, **kwargs):
         update_fields = kwargs.get("update_fields")
         self.sync_business_relations()
@@ -436,6 +441,11 @@ class Booking(TimeStampedModel):
         if self.has_overlap():
             raise ValidationError(
                 _("Selected time slot overlaps with another booking.")
+            )
+
+        if self.has_master_unavailability_overlap():
+            raise ValidationError(
+                _("Selected time slot overlaps with master unavailability.")
             )
 
     def sync_service_duration(self):
@@ -510,6 +520,21 @@ class Booking(TimeStampedModel):
             .exclude(pk=self.pk)
             .exists()
         )
+
+    def has_master_unavailability_overlap(self):
+        if self.status == self.Status.CANCELLED:
+            return False
+
+        if not all([self.master_id, self.start_time, self.end_time]):
+            return False
+
+        return MasterUnavailability.objects.filter(
+            business=self.business,
+            master=self.master,
+            is_active=True,
+            start_time__lt=self.end_time,
+            end_time__gt=self.start_time,
+        ).exists()
 
     @property
     def total_slot_duration(self):
