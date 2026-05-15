@@ -283,6 +283,8 @@ def _polish_sidebar_titles(navigation, request):
     }
     for group in navigation:
         for item in group.get("items", []):
+            if item.get("preserve_title"):
+                continue
             link = str(item.get("link") or "")
             for marker, title in item_titles.items():
                 if marker in link:
@@ -466,6 +468,18 @@ def get_clean_sidebar_navigation(request):
                     "title": "Диалоги",
                     "icon": "forum",
                     "link": reverse("admin:bookings_conversationmessage_inbox"),
+                },
+            ],
+        },
+        {
+            "title": "Аналитика",
+            "icon": "insights",
+            "items": [
+                {
+                    "title": "Сводка по салону",
+                    "icon": "bar_chart",
+                    "link": reverse("admin:bookings_business_analytics"),
+                    "preserve_title": True,
                 },
             ],
         },
@@ -800,6 +814,51 @@ class BusinessAdmin(TenantScopedAdminMixin, ModelAdmin):
     @display(description="Активен", label={True: "success", False: "danger"})
     def colored_active(self, obj):
         return obj.is_active
+
+    def get_urls(self):
+        return [
+            path(
+                "analytics/",
+                self.admin_site.admin_view(self.analytics_view),
+                name="bookings_business_analytics",
+            ),
+            *super().get_urls(),
+        ]
+
+    def analytics_view(self, request):
+        """Owner analytics dashboard — bookings, conversion, revenue."""
+        if not request.user.is_authenticated or not request.user.is_staff:
+            return redirect(f"{reverse('admin:login')}?next={request.path}")
+
+        # Period selector: today / 7d / 30d. Default 30 days.
+        period = request.GET.get("period", "30d")
+        if period not in {"today", "7d", "30d"}:
+            period = "30d"
+
+        # Tenant scoping — owners see only their businesses; superusers see all
+        # (or one selected — future enhancement).
+        business_ids = self.get_admin_business_ids(request)
+        businesses = Business.objects.filter(is_active=True)
+        if business_ids is not None:
+            businesses = businesses.filter(pk__in=business_ids)
+
+        context = {
+            **self.admin_site.each_context(request),
+            "title": "Аналитика салона",
+            "opts": self.model._meta,
+            "selected_period": period,
+            "period_options": [
+                ("today", "Сегодня"),
+                ("7d", "7 дней"),
+                ("30d", "30 дней"),
+            ],
+            "businesses": list(businesses),
+        }
+        return TemplateResponse(
+            request,
+            "admin/bookings/business/analytics.html",
+            context,
+        )
 
 
 @admin.register(Category)

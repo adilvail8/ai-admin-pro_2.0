@@ -8502,6 +8502,7 @@ def test_owner_gets_salon_scoped_sidebar_and_branding(
     assert [group["title"] for group in navigation] == [
         "\u0423\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u0435",
         "\u041f\u0435\u0440\u0435\u043f\u0438\u0441\u043a\u0430",
+        "\u0410\u043d\u0430\u043b\u0438\u0442\u0438\u043a\u0430",
     ]
     assert [item["title"] for item in navigation[0]["items"]] == [
         "\u0411\u0440\u043e\u043d\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f",
@@ -8513,6 +8514,9 @@ def test_owner_gets_salon_scoped_sidebar_and_branding(
     ]
     assert [item["title"] for item in navigation[1]["items"]] == [
         "\u0414\u0438\u0430\u043b\u043e\u0433\u0438",
+    ]
+    assert [item["title"] for item in navigation[2]["items"]] == [
+        "\u0421\u0432\u043e\u0434\u043a\u0430 \u043f\u043e \u0441\u0430\u043b\u043e\u043d\u0443",
     ]
     assert site_header_callback(request) == business_membership.business.display_brand_name
     assert canonical_site_title_callback(request) == (
