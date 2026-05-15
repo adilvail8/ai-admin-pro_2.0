@@ -551,6 +551,156 @@ def test_get_available_slots_ignores_inactive_master_unavailability(
 
 
 @pytest.mark.django_db
+def test_master_unavailability_rejects_non_positive_window(
+    business,
+    master,
+):
+    """end_time must be strictly greater than start_time. The DB has a
+    CheckConstraint enforcing this, but clean() also raises a
+    user-facing ValidationError so the admin form surfaces the error
+    instead of bubbling a database IntegrityError."""
+    start = timezone.now() + timedelta(days=1)
+    instance = MasterUnavailability(
+        business=business,
+        master=master,
+        start_time=start,
+        end_time=start,  # equal — must be rejected
+        reason="Zero-length window",
+    )
+    with pytest.raises(ValidationError, match="end_time"):
+        instance.full_clean()
+
+    instance_backwards = MasterUnavailability(
+        business=business,
+        master=master,
+        start_time=start + timedelta(hours=1),
+        end_time=start,  # earlier than start — must be rejected
+        reason="Backwards window",
+    )
+    with pytest.raises(ValidationError, match="end_time"):
+        instance_backwards.full_clean()
+
+
+@pytest.mark.django_db
+def test_master_unavailability_rejects_master_from_other_business(
+    business,
+    another_business,
+):
+    """clean() must refuse to attach a master to a business it does
+    not belong to — closes the cross-tenant FK loophole that Django
+    does not enforce automatically."""
+    foreign_master = Master.objects.create(
+        business=another_business,
+        full_name="Foreign Master",
+        specialization="Stylist",
+    )
+    start = timezone.now() + timedelta(days=1)
+    instance = MasterUnavailability(
+        business=business,  # different from foreign_master.business
+        master=foreign_master,
+        start_time=start,
+        end_time=start + timedelta(hours=1),
+        reason="Tenant leak attempt",
+    )
+    with pytest.raises(ValidationError, match="business"):
+        instance.full_clean()
+
+
+@pytest.mark.django_db
+def test_get_available_slots_unavailability_only_affects_target_master(
+    business,
+    service,
+):
+    """Vacation booked for master A must not remove slots for master B
+    on the same date — the unavailability filter must be FK-scoped, not
+    business-wide."""
+    days_until_monday = (7 - timezone.localdate().weekday()) % 7 or 7
+    monday = timezone.localdate() + timedelta(days=days_until_monday)
+
+    master_a = Master.objects.create(
+        business=business,
+        full_name="Alpha Master",
+        specialization="Stylist",
+        working_hours={"mon": {"start": "10:00", "end": "18:00"}},
+    )
+    master_b = Master.objects.create(
+        business=business,
+        full_name="Beta Master",
+        specialization="Stylist",
+        working_hours={"mon": {"start": "10:00", "end": "18:00"}},
+    )
+    MasterUnavailability.objects.create(
+        business=business,
+        master=master_a,
+        start_time=Booking.make_aware_datetime(monday, time(hour=10, minute=0)),
+        end_time=Booking.make_aware_datetime(monday, time(hour=12, minute=0)),
+        reason="Doctor's appointment",
+    )
+
+    # Master A has the 10-12 hole.
+    slots_a = get_available_slots(
+        business, target_date=monday, service_id=service.id, master_id=master_a.id,
+    )
+    starts_a = {(s.start.hour, s.start.minute) for s in slots_a}
+    assert (10, 0) not in starts_a
+    assert (11, 0) not in starts_a
+    assert (12, 0) in starts_a
+
+    # Master B is untouched.
+    slots_b = get_available_slots(
+        business, target_date=monday, service_id=service.id, master_id=master_b.id,
+    )
+    starts_b = {(s.start.hour, s.start.minute) for s in slots_b}
+    assert (10, 0) in starts_b
+    assert (11, 0) in starts_b
+
+
+@pytest.mark.django_db
+def test_master_unavailability_admin_scopes_to_owner_businesses(
+    client,
+    owner_user,
+    business,
+    another_business,
+    master,
+    business_membership,
+):
+    """TenantScopedAdminMixin must filter the changelist queryset so an
+    owner sees only their own business's unavailability rows, not those
+    of a foreign business sharing the same database."""
+    foreign_master = Master.objects.create(
+        business=another_business,
+        full_name="Foreign Master",
+        specialization="Stylist",
+    )
+    own_row = MasterUnavailability.objects.create(
+        business=business,
+        master=master,
+        start_time=timezone.now() + timedelta(days=1),
+        end_time=timezone.now() + timedelta(days=1, hours=2),
+        reason="Own vacation",
+    )
+    foreign_row = MasterUnavailability.objects.create(
+        business=another_business,
+        master=foreign_master,
+        start_time=timezone.now() + timedelta(days=2),
+        end_time=timezone.now() + timedelta(days=2, hours=2),
+        reason="Foreign vacation",
+    )
+
+    owner_user.is_staff = True
+    owner_user.save(update_fields=["is_staff"])
+    client.force_login(owner_user)
+    response = client.get("/secure-admin/bookings/masterunavailability/")
+    assert response.status_code == 200
+    content = response.content.decode("utf-8")
+    assert "Own vacation" in content
+    assert "Foreign vacation" not in content
+    # Sanity: both rows do exist in the database — the admin filtered them.
+    assert MasterUnavailability.objects.filter(pk=own_row.pk).exists()
+    assert MasterUnavailability.objects.filter(pk=foreign_row.pk).exists()
+
+
+@pytest.mark.django_db
 def test_get_available_slots_rejects_foreign_master_id(
     business,
     another_business,
