@@ -34,6 +34,7 @@ from .models import (
     ConversationThread,
     InboundEvent,
     Master,
+    MasterUnavailability,
     OutboundMessage,
     Service,
 )
@@ -1082,6 +1083,28 @@ class MasterAdmin(TenantScopedAdminMixin, ModelAdmin):
         initial = super().get_changeform_initial_data(request)
         initial.setdefault("working_hours", DEFAULT_NEW_MASTER_WORKING_HOURS)
         return initial
+
+
+@admin.register(MasterUnavailability)
+class MasterUnavailabilityAdmin(TenantScopedAdminMixin, ModelAdmin):
+    business_related_fields = ("master",)
+    date_hierarchy = "start_time"
+    list_display = (
+        "master",
+        "business",
+        "start_time",
+        "end_time",
+        "reason",
+        "colored_active",
+    )
+    list_filter = ("business", "master", "is_active")
+    list_select_related = ("business", "master")
+    search_fields = ("master__full_name", "reason")
+    ordering = ("start_time", "master__full_name")
+
+    @display(description="Активно", label={True: "success", False: "danger"})
+    def colored_active(self, obj):
+        return obj.is_active
 
 
 @admin.register(Service)
