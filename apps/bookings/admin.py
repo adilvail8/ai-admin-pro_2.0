@@ -395,6 +395,14 @@ def get_clean_sidebar_navigation(request):
                         "link": reverse("admin:bookings_master_changelist"),
                     },
                     {
+                        "title": "Отпуска мастеров",
+                        "icon": "event_busy",
+                        "link": reverse(
+                            "admin:bookings_masterunavailability_changelist"
+                        ),
+                        "preserve_title": True,
+                    },
+                    {
                         "title": "Услуги",
                         "icon": "spa",
                         "link": reverse("admin:bookings_service_changelist"),
@@ -444,6 +452,14 @@ def get_clean_sidebar_navigation(request):
                     "title": "Мастера",
                     "icon": "person",
                     "link": reverse("admin:bookings_master_changelist"),
+                },
+                {
+                    "title": "Отпуска мастеров",
+                    "icon": "event_busy",
+                    "link": reverse(
+                        "admin:bookings_masterunavailability_changelist"
+                    ),
+                    "preserve_title": True,
                 },
                 {
                     "title": "Услуги",
