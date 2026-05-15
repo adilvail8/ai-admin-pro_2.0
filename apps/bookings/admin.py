@@ -955,6 +955,44 @@ class BusinessAdmin(TenantScopedAdminMixin, ModelAdmin):
                 row["channel"], row["channel"]
             )
 
+        # Conversion — unique clients who messaged vs unique clients who got
+        # a booking_created audit. Both anchored on the same period window
+        # via created_at, so the ratio answers "how many of those who talked
+        # to the bot ended up with a booking in the same window".
+        unique_clients_messaged = (
+            ConversationMessage.objects.filter(
+                business__in=businesses,
+                role=ConversationMessage.Role.USER,
+            )
+            .filter(messages_filter)
+            .values("client_id")
+            .distinct()
+            .count()
+        )
+        unique_clients_booked = (
+            AuditLog.objects.filter(
+                business__in=businesses,
+                event_type="booking_created",
+            )
+            .filter(messages_filter)
+            .exclude(client__isnull=True)
+            .values("client_id")
+            .distinct()
+            .count()
+        )
+        conversion_rate = pct(unique_clients_booked, unique_clients_messaged)
+
+        # Repeat clients — same client with 2+ CONFIRMED bookings in the
+        # period window. Anchored on Booking.start_time (consistent with
+        # the KPI cards above).
+        repeat_clients = (
+            bookings_qs.filter(status=Booking.Status.CONFIRMED)
+            .values("client_id")
+            .annotate(n=Count("id"))
+            .filter(n__gte=2)
+            .count()
+        )
+
         context = {
             **self.admin_site.each_context(request),
             "title": "Аналитика салона",
@@ -970,6 +1008,12 @@ class BusinessAdmin(TenantScopedAdminMixin, ModelAdmin):
             "top_services": top_services,
             "master_workload": master_workload,
             "channel_breakdown": channel_breakdown,
+            "conversion": {
+                "messaged": unique_clients_messaged,
+                "booked": unique_clients_booked,
+                "rate": conversion_rate,
+            },
+            "repeat_clients": repeat_clients,
         }
         return TemplateResponse(
             request,

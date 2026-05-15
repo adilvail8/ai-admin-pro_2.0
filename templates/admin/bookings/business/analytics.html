@@ -60,6 +60,35 @@
       {% endfor %}
     </div>
 
+    {# Conversion + repeat clients — single row of two callouts #}
+    <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 16px; margin-bottom: 24px;">
+
+      <div style="background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 18px; border-left: 4px solid #2563eb;">
+        <div style="font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px;">
+          Конверсия: диалог → запись
+        </div>
+        <div style="font-size: 28px; font-weight: 600; color: #111827; line-height: 1.2;">
+          {{ conversion.rate }}%
+        </div>
+        <div style="font-size: 13px; color: #6b7280; margin-top: 6px;">
+          {{ conversion.booked }} из {{ conversion.messaged }} клиентов записались
+        </div>
+      </div>
+
+      <div style="background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 18px; border-left: 4px solid #8b5cf6;">
+        <div style="font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px;">
+          Повторные клиенты
+        </div>
+        <div style="font-size: 28px; font-weight: 600; color: #111827; line-height: 1.2;">
+          {{ repeat_clients }}
+        </div>
+        <div style="font-size: 13px; color: #6b7280; margin-top: 6px;">
+          с 2+ подтверждёнными записями
+        </div>
+      </div>
+
+    </div>
+
     {# Breakdowns: top services / master workload / channels #}
     <div class="analytics-breakdowns" style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px;">
 
