@@ -983,11 +983,23 @@ class BusinessAdmin(TenantScopedAdminMixin, ModelAdmin):
         )
         conversion_rate = pct(unique_clients_booked, unique_clients_messaged)
 
-        # Repeat clients — same client with 2+ CONFIRMED bookings in the
-        # period window. Anchored on Booking.start_time (consistent with
-        # the KPI cards above).
-        repeat_clients = (
+        # Repeat clients — hybrid metric. The "period" count answers
+        # "how many regulars came back in the selected window"; the
+        # "lifetime" count answers "how big is our loyal base overall".
+        # Owner sees both at once so the period selector still drives the
+        # primary number while the lifetime context stays visible.
+        repeat_clients_period = (
             bookings_qs.filter(status=Booking.Status.CONFIRMED)
+            .values("client_id")
+            .annotate(n=Count("id"))
+            .filter(n__gte=2)
+            .count()
+        )
+        repeat_clients_lifetime = (
+            Booking.objects.filter(
+                business__in=businesses,
+                status=Booking.Status.CONFIRMED,
+            )
             .values("client_id")
             .annotate(n=Count("id"))
             .filter(n__gte=2)
@@ -1014,7 +1026,10 @@ class BusinessAdmin(TenantScopedAdminMixin, ModelAdmin):
                 "booked": unique_clients_booked,
                 "rate": conversion_rate,
             },
-            "repeat_clients": repeat_clients,
+            "repeat_clients": {
+                "period": repeat_clients_period,
+                "lifetime": repeat_clients_lifetime,
+            },
         }
         return TemplateResponse(
             request,

@@ -7558,6 +7558,10 @@ def xest_superuser_keeps_full_integrator_sidebar_and_title():
         "Справочники",
         "Система",
     ]
+    # Owner-only "Аналитика" group must not leak into the integrator
+    # sidebar — superuser already has the per-business AI billing
+    # dashboard via AIInteractionLog admin.
+    assert "Аналитика" not in [group["title"] for group in navigation]
     assert site_header_callback(request) == "AI Admin Pro"
     assert canonical_site_title_callback(request) == "AI Admin Pro"
     assert canonical_site_subheader_callback(request) == "Интеграторская панель"
@@ -8648,6 +8652,10 @@ def xest_superuser_keeps_full_integrator_sidebar_and_title_mojibake_duplicate():
         "Справочники",
         "Система",
     ]
+    # Owner-only "Аналитика" group must not leak into the integrator
+    # sidebar — superuser already has the per-business AI billing
+    # dashboard via AIInteractionLog admin.
+    assert "Аналитика" not in [group["title"] for group in navigation]
     assert site_header_callback(request) == "AI Admin Pro"
     assert site_title_callback(request) == "AI Admin Pro"
     assert site_subheader_callback(request) == "Интеграторская панель"
