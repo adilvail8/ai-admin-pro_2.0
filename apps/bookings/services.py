@@ -7,7 +7,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from .audit import create_audit_log
-from .models import Booking, Business, Client
+from .models import Booking, Business, Client, MasterUnavailability
 
 
 DEFAULT_SLOT_STEP = timedelta(minutes=30)
@@ -205,6 +205,15 @@ def get_available_slots(
             )
             .values("start_time", "end_time")
         )
+        unavailabilities = list(
+            MasterUnavailability.objects.filter(
+                business=business,
+                master=master,
+                is_active=True,
+                start_time__lt=day_end,
+                end_time__gt=day_start,
+            ).values("start_time", "end_time")
+        )
         for slot in iter_master_slots(
             master=master,
             target_date=target_date,
@@ -214,8 +223,11 @@ def get_available_slots(
         ):
             if is_today_in_business_timezone and slot.start < local_now:
                 continue
-            if not slot_overlaps(slot, bookings):
-                available_slots.append(slot)
+            if slot_overlaps(slot, bookings):
+                continue
+            if slot_overlaps(slot, unavailabilities):
+                continue
+            available_slots.append(slot)
 
     return sorted(
         available_slots,

@@ -69,6 +69,7 @@ from apps.bookings.models import (
     ConversationMessage,
     InboundEvent,
     Master,
+    MasterUnavailability,
     OutboundMessage,
     Service,
 )
@@ -426,6 +427,67 @@ def test_get_available_slots_respects_buffer_time(
     assert (10, 30) not in slot_starts
     assert (11, 0) not in slot_starts
     assert (11, 30) in slot_starts
+
+
+@pytest.mark.django_db
+def test_get_available_slots_excludes_master_unavailability(
+    business,
+    master,
+    service,
+):
+    days_until_monday = (7 - timezone.localdate().weekday()) % 7 or 7
+    monday = timezone.localdate() + timedelta(days=days_until_monday)
+
+    MasterUnavailability.objects.create(
+        business=business,
+        master=master,
+        start_time=Booking.make_aware_datetime(monday, time(hour=10, minute=0)),
+        end_time=Booking.make_aware_datetime(monday, time(hour=12, minute=0)),
+        reason="Vacation",
+    )
+
+    slots = get_available_slots(
+        business,
+        target_date=monday,
+        service_id=service.id,
+        master_id=master.id,
+    )
+
+    slot_starts = {(slot.start.hour, slot.start.minute) for slot in slots}
+    assert (10, 0) not in slot_starts
+    assert (10, 30) not in slot_starts
+    assert (11, 0) not in slot_starts
+    assert (11, 30) not in slot_starts
+    assert (12, 0) in slot_starts
+
+
+@pytest.mark.django_db
+def test_get_available_slots_ignores_inactive_master_unavailability(
+    business,
+    master,
+    service,
+):
+    days_until_monday = (7 - timezone.localdate().weekday()) % 7 or 7
+    monday = timezone.localdate() + timedelta(days=days_until_monday)
+
+    MasterUnavailability.objects.create(
+        business=business,
+        master=master,
+        start_time=Booking.make_aware_datetime(monday, time(hour=10, minute=0)),
+        end_time=Booking.make_aware_datetime(monday, time(hour=12, minute=0)),
+        reason="Cancelled vacation",
+        is_active=False,
+    )
+
+    slots = get_available_slots(
+        business,
+        target_date=monday,
+        service_id=service.id,
+        master_id=master.id,
+    )
+
+    slot_starts = {(slot.start.hour, slot.start.minute) for slot in slots}
+    assert (10, 0) in slot_starts
 
 
 @pytest.mark.django_db
