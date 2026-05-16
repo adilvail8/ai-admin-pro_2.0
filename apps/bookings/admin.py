@@ -1316,22 +1316,52 @@ class ServiceAdmin(TenantScopedAdminMixin, ModelAdmin):
 @admin.register(Client)
 class ClientAdmin(TenantScopedAdminMixin, ModelAdmin):
     list_display = (
-        "name",
+        "name_display",
         "business",
-        "phone",
-        "telegram_id",
-        "whatsapp_id",
+        "phone_display",
+        "channel_display",
         "dialogs_link",
         "reply_link",
-        "ai_failure_count",
+        "ai_failure_count_display",
         "colored_active",
     )
     list_filter = ("business", "is_active")
     search_fields = ("name", "phone", "telegram_id", "whatsapp_id")
+    ordering = ("name", "phone")
 
     @display(description="Активен", label={True: "success", False: "danger"})
     def colored_active(self, obj):
         return obj.is_active
+
+    @display(description="Клиент", ordering="name")
+    def name_display(self, obj):
+        # Fall back to phone when the name is missing — same shape as
+        # Client.__str__ but goes through here so the column gets a
+        # Russian header without changing the model contract.
+        return obj.name or (str(obj.phone) if obj.phone else "—")
+
+    @display(description="Телефон", ordering="phone")
+    def phone_display(self, obj):
+        return str(obj.phone) if obj.phone else "—"
+
+    @display(description="Канал")
+    def channel_display(self, obj):
+        # Show which messenger(s) the client actually used. telegram_id
+        # / whatsapp_id are populated when the bot first sees a message
+        # from that channel — empty means the client has never used it.
+        tags = []
+        if obj.telegram_id:
+            tags.append("TG")
+        if obj.whatsapp_id:
+            tags.append("WA")
+        return " / ".join(tags) if tags else "—"
+
+    @display(description="Сбои AI", ordering="ai_failure_count")
+    def ai_failure_count_display(self, obj):
+        # Hide zeros so a column scan highlights only clients with
+        # actual failures.
+        count = obj.ai_failure_count or 0
+        return str(count) if count else ""
 
     @display(description="Диалог")
     def dialogs_link(self, obj):
