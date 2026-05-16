@@ -1211,24 +1211,106 @@ class MasterUnavailabilityAdmin(TenantScopedAdminMixin, ModelAdmin):
         return obj.is_active
 
 
+def _format_price_kzt(price) -> str:
+    """Decimal/int price → '9 000 ₸' with thin-space thousand separator."""
+    if price is None:
+        return "—"
+    try:
+        amount = int(price)
+    except (TypeError, ValueError):
+        return str(price)
+    return f"{amount:,} ₸".replace(",", " ")
+
+
+def _format_duration_ru(duration) -> str:
+    """timedelta → '45 мин' / '1 ч' / '1 ч 30 мин' / '—' for zero/None."""
+    if duration is None:
+        return "—"
+    total_minutes = int(duration.total_seconds() // 60)
+    if total_minutes <= 0:
+        return "—"
+    hours, minutes = divmod(total_minutes, 60)
+    if hours and minutes:
+        return f"{hours} ч {minutes} мин"
+    if hours:
+        return f"{hours} ч"
+    return f"{minutes} мин"
+
+
+class TenantCategoryListFilter(admin.SimpleListFilter):
+    """Service-category filter scoped to the request's businesses.
+
+    Same rationale as TenantMasterListFilter: Django's default would
+    show every Category row site-wide (foreign tenants visible in the
+    sidebar), and Category.__str__ appends a "(Business name)" suffix
+    that's noise inside a single-tenant view.
+    """
+
+    title = "Категория"
+    parameter_name = "category"
+
+    def lookups(self, request, model_admin):
+        queryset = Category.objects.select_related("business").filter(is_active=True)
+        business_ids = _get_request_business_ids(request)
+        if business_ids is not None:
+            queryset = queryset.filter(business_id__in=business_ids)
+        is_super = bool(getattr(request.user, "is_superuser", False))
+        return [
+            (
+                category.id,
+                f"{category.name} ({category.business.name})"
+                if is_super
+                else category.name,
+            )
+            for category in queryset.order_by("name")
+        ]
+
+    def queryset(self, request, queryset):
+        value = self.value()
+        if value:
+            return queryset.filter(category_id=value)
+        return queryset
+
+
 @admin.register(Service)
 class ServiceAdmin(TenantScopedAdminMixin, ModelAdmin):
     business_related_fields = ("category",)
     list_display = (
-        "name",
-        "category",
+        "name_display",
+        "category_display",
         "business",
-        "price",
-        "duration",
-        "buffer_time",
+        "price_display",
+        "duration_display",
+        "buffer_display",
         "colored_active",
     )
-    list_filter = ("business", "category", "is_active")
+    list_filter = ("business", TenantCategoryListFilter, "is_active")
     search_fields = ("name", "category__name")
+    ordering = ("name",)
 
     @display(description="Активна", label={True: "success", False: "danger"})
     def colored_active(self, obj):
         return obj.is_active
+
+    @display(description="Услуга", ordering="name")
+    def name_display(self, obj):
+        return obj.name
+
+    @display(description="Категория", ordering="category__name")
+    def category_display(self, obj):
+        return obj.category.name if obj.category_id else "—"
+
+    @display(description="Цена", ordering="price")
+    def price_display(self, obj):
+        return _format_price_kzt(obj.price)
+
+    @display(description="Длительность", ordering="duration")
+    def duration_display(self, obj):
+        return _format_duration_ru(obj.duration)
+
+    @display(description="Буфер", ordering="buffer_time")
+    def buffer_display(self, obj):
+        return _format_duration_ru(obj.buffer_time)
 
 
 @admin.register(Client)
