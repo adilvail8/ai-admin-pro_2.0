@@ -1174,23 +1174,65 @@ class ClientAdmin(TenantScopedAdminMixin, ModelAdmin):
         return format_html('<a href="{}">Написать</a>', url)
 
 
+class TenantMasterListFilter(admin.SimpleListFilter):
+    """Master filter that scopes the dropdown to the request's businesses.
+
+    Django's default RelatedFieldListFilter shows every Master row in the
+    database — for an owner that means foreign salons' master names leak
+    into the filter sidebar (info disclosure), and Master.__str__ adds a
+    "(Business name)" suffix that's pure noise inside a single-tenant view.
+
+    This filter:
+    - Restricts the dropdown to masters from the user's businesses.
+    - Renders plain ``full_name`` for owners; for super_admins (who see
+      multiple tenants) keeps the business suffix so duplicates stay
+      distinguishable.
+    """
+
+    title = "Мастер"
+    parameter_name = "master"
+
+    def lookups(self, request, model_admin):
+        queryset = Master.objects.select_related("business").filter(is_active=True)
+        business_ids = _get_request_business_ids(request)
+        if business_ids is not None:
+            queryset = queryset.filter(business_id__in=business_ids)
+        is_super = bool(getattr(request.user, "is_superuser", False))
+        return [
+            (
+                master.id,
+                f"{master.full_name} ({master.business.name})"
+                if is_super
+                else master.full_name,
+            )
+            for master in queryset.order_by("full_name")
+        ]
+
+    def queryset(self, request, queryset):
+        value = self.value()
+        if value:
+            return queryset.filter(master_id=value)
+        return queryset
+
+
 @admin.register(Booking)
 class BookingAdmin(TenantScopedAdminMixin, ModelAdmin):
     business_related_fields = ("client", "master", "service")
     actions = ("mark_confirmed", "mark_cancelled", "mark_no_show")
     date_hierarchy = "start_time"
+    ordering = ("-start_time",)
     list_display = (
         "id",
         "colored_status",
-        "client",
-        "master",
-        "service",
-        "start_time",
-        "end_time",
+        "client_display",
+        "master_display",
+        "service_display",
+        "start_time_display",
+        "end_time_display",
         "business",
     )
-    list_display_links = ("id", "client")
-    list_filter = ("status", "business", "master")
+    list_display_links = ("id", "client_display")
+    list_filter = ("status", "business", TenantMasterListFilter)
     search_fields = (
         "client__name",
         "client__phone",
@@ -1271,6 +1313,32 @@ class BookingAdmin(TenantScopedAdminMixin, ModelAdmin):
     @display(description="Статус", label=BOOKING_STATUS_LABELS)
     def colored_status(self, obj):
         return obj.status
+
+    @display(description="Клиент", ordering="client__name")
+    def client_display(self, obj):
+        # Bypass Client.__str__ to drop the redundant phone-fallback noise
+        # in admin lists — name first, phone only when name is empty.
+        return obj.client.name or (str(obj.client.phone) if obj.client.phone else "—")
+
+    @display(description="Мастер", ordering="master__full_name")
+    def master_display(self, obj):
+        # Master.__str__ appends "(Business name)" which is noise for an
+        # owner already inside their own tenant context. Show plain name.
+        return obj.master.full_name if obj.master_id else "—"
+
+    @display(description="Услуга", ordering="service__name")
+    def service_display(self, obj):
+        # Same reason as master_display — strip the business-name suffix
+        # baked into Service.__str__.
+        return obj.service.name if obj.service_id else "—"
+
+    @display(description="Начало", ordering="start_time")
+    def start_time_display(self, obj):
+        return obj.start_time
+
+    @display(description="Конец", ordering="end_time")
+    def end_time_display(self, obj):
+        return obj.end_time
 
     def _apply_status_action(self, request, queryset, *, target_status: str, label: str):
         updated = 0
