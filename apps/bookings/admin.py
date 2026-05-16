@@ -37,6 +37,7 @@ from .models import (
     MasterUnavailability,
     OutboundMessage,
     Service,
+    WEEKDAY_KEYS,
 )
 from .services import update_booking_status
 from .widgets import WorkingHoursWidget
@@ -1074,6 +1075,74 @@ DEFAULT_NEW_MASTER_WORKING_HOURS = {
     "fri": {"start": "09:00", "end": "18:00"},
 }
 
+_WEEKDAY_SHORT_LABELS = {
+    "mon": "Пн",
+    "tue": "Вт",
+    "wed": "Ср",
+    "thu": "Чт",
+    "fri": "Пт",
+    "sat": "Сб",
+    "sun": "Вс",
+}
+
+
+def _summarize_working_hours(working_hours) -> str:
+    """Compress a weekly schedule dict into a compact human-readable string.
+
+    Walks the canonical Mon→Sun order, groups consecutive days with
+    identical start/end times into a single range, and renders each group
+    as either "Пн 10:00-18:00" (single day) or "Пн-Пт 10:00-18:00"
+    (range). Days without an entry (or with incomplete data) are treated
+    as days off and break the current range.
+
+    Real-world example:
+        {"mon": "10-20", "tue": "10-20", ..., "fri": "10-21", "sat": "10-21", "sun": "11-19"}
+        → "Пн-Чт 10:00-20:00, Пт-Сб 10:00-21:00, Вс 11:00-19:00"
+    """
+    if not isinstance(working_hours, dict) or not working_hours:
+        return "—"
+
+    groups = []
+    current = None  # tuple (start_key, end_key, (start_time, end_time))
+    for key in WEEKDAY_KEYS:
+        day = working_hours.get(key)
+        if not isinstance(day, dict):
+            if current is not None:
+                groups.append(current)
+                current = None
+            continue
+        start = (day.get("start") or "").strip()
+        end = (day.get("end") or "").strip()
+        if not start or not end:
+            if current is not None:
+                groups.append(current)
+                current = None
+            continue
+        hours = (start, end)
+        if current is not None and current[2] == hours:
+            current = (current[0], key, hours)
+        else:
+            if current is not None:
+                groups.append(current)
+            current = (key, key, hours)
+    if current is not None:
+        groups.append(current)
+
+    if not groups:
+        return "—"
+
+    parts = []
+    for start_key, end_key, (start, end) in groups:
+        if start_key == end_key:
+            day_label = _WEEKDAY_SHORT_LABELS[start_key]
+        else:
+            day_label = (
+                f"{_WEEKDAY_SHORT_LABELS[start_key]}-"
+                f"{_WEEKDAY_SHORT_LABELS[end_key]}"
+            )
+        parts.append(f"{day_label} {start}-{end}")
+    return ", ".join(parts)
+
 
 class MasterForm(forms.ModelForm):
     class Meta:
@@ -1087,13 +1156,32 @@ class MasterForm(forms.ModelForm):
 @admin.register(Master)
 class MasterAdmin(TenantScopedAdminMixin, ModelAdmin):
     form = MasterForm
-    list_display = ("full_name", "business", "specialization", "colored_active")
+    list_display = (
+        "full_name_display",
+        "business",
+        "specialization_display",
+        "schedule_summary",
+        "colored_active",
+    )
     list_filter = ("business", "is_active")
     search_fields = ("full_name", "specialization")
+    ordering = ("full_name",)
 
     @display(description="Активен", label={True: "success", False: "danger"})
     def colored_active(self, obj):
         return obj.is_active
+
+    @display(description="Мастер", ordering="full_name")
+    def full_name_display(self, obj):
+        return obj.full_name
+
+    @display(description="Специализация", ordering="specialization")
+    def specialization_display(self, obj):
+        return obj.specialization or "—"
+
+    @display(description="Расписание")
+    def schedule_summary(self, obj):
+        return _summarize_working_hours(obj.working_hours)
 
     def get_changeform_initial_data(self, request):
         initial = super().get_changeform_initial_data(request)
