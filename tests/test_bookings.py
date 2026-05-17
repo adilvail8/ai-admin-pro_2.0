@@ -10848,3 +10848,168 @@ def test_outbound_reply_dedupes_within_window(client, business, monkeypatch):
         outbound_message=outbound,
         event_type="outbound_reply_skipped_duplicate",
     ).exists()
+
+
+# ---------------------------------------------------------------------------
+# Per-business Telegram credentials (ТЗ #12)
+# ---------------------------------------------------------------------------
+
+TELEGRAM_UPDATE_PAYLOAD = {
+    "update_id": 99001,
+    "message": {
+        "message_id": 9001,
+        "chat": {"id": 800001},
+        "from": {"id": 800001, "first_name": "TG User"},
+        "text": "Привет",
+    },
+}
+
+
+@pytest.mark.django_db
+def test_telegram_webhook_accepts_per_business_secret(client, business, monkeypatch):
+    """Webhook на /telegram/<business_id>/<secret>/ принимается,
+    когда в БД есть Business с одновременным совпадением (id, secret)."""
+    business.telegram_webhook_secret = "biz-secret-77"
+    business.telegram_bot_token = "biz-token-77"
+    business.save(
+        update_fields=[
+            "telegram_webhook_secret",
+            "telegram_bot_token",
+            "updated_at",
+        ]
+    )
+    monkeypatch.setattr(
+        "apps.bookings.views.process_webhook_request",
+        lambda **kwargs: JsonResponse({"reply": "ok"}, status=200),
+    )
+
+    response = client.post(
+        f"/api/v1/webhooks/telegram/{business.id}/biz-secret-77/",
+        data=json.dumps(TELEGRAM_UPDATE_PAYLOAD),
+        content_type="application/json",
+    )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.django_db
+def test_telegram_webhook_rejects_wrong_secret_for_correct_business(
+    client,
+    business,
+    monkeypatch,
+):
+    business.telegram_webhook_secret = "biz-secret-77"
+    business.save(
+        update_fields=["telegram_webhook_secret", "updated_at"]
+    )
+    monkeypatch.setattr(
+        "apps.bookings.views.process_webhook_request",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("must not reach handler")
+        ),
+    )
+
+    response = client.post(
+        f"/api/v1/webhooks/telegram/{business.id}/wrong-secret/",
+        data=json.dumps(TELEGRAM_UPDATE_PAYLOAD),
+        content_type="application/json",
+    )
+
+    assert response.status_code == 403
+
+
+@pytest.mark.django_db
+def test_telegram_webhook_rejects_correct_secret_for_wrong_business(
+    client,
+    business,
+    another_business,
+    monkeypatch,
+):
+    """Security regression: атакующий, знающий secret salon-А, не
+    должен мочь постить webhook на URL salon-Б. Lookup (id=B, secret=A)
+    обязан вернуть пусто; global fallback тоже не совпадёт."""
+    business.telegram_webhook_secret = "biz-secret-A"
+    business.save(update_fields=["telegram_webhook_secret", "updated_at"])
+    # another_business намеренно с пустым secret — атакующий пытается
+    # использовать secret business'а А на URL business'а B.
+    monkeypatch.setattr(
+        "apps.bookings.views.process_webhook_request",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("cross-tenant request must be rejected")
+        ),
+    )
+
+    response = client.post(
+        f"/api/v1/webhooks/telegram/{another_business.id}/biz-secret-A/",
+        data=json.dumps(TELEGRAM_UPDATE_PAYLOAD),
+        content_type="application/json",
+    )
+
+    assert response.status_code == 403
+
+
+@pytest.mark.django_db
+@override_settings(TELEGRAM_WEBHOOK_SECRET="global-secret")
+def test_telegram_webhook_falls_back_to_global_secret(client, business, monkeypatch):
+    """Когда у Business нет per-business secret'а, settings.TELEGRAM_WEBHOOK_SECRET
+    остаётся валидным fallback'ом — иначе сломаем существующие deployment'ы,
+    где ещё не мигрировали на per-business конфиг."""
+    # Business фикстура по умолчанию НЕ имеет telegram_webhook_secret.
+    assert business.telegram_webhook_secret == ""
+    monkeypatch.setattr(
+        "apps.bookings.views.process_webhook_request",
+        lambda **kwargs: JsonResponse({"reply": "ok"}, status=200),
+    )
+
+    response = client.post(
+        f"/api/v1/webhooks/telegram/{business.id}/global-secret/",
+        data=json.dumps(TELEGRAM_UPDATE_PAYLOAD),
+        content_type="application/json",
+    )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.django_db
+@override_settings(TELEGRAM_BOT_TOKEN="global-token")
+def test_telegram_transport_uses_business_bot_token_when_set(business):
+    business.telegram_bot_token = "biz-token-77"
+    business.save(update_fields=["telegram_bot_token", "updated_at"])
+
+    transport = TelegramTransport(business=business)
+    request = transport.build_request(
+        recipient="800001",
+        text="hi",
+        metadata=None,
+    )
+
+    assert request["url"] == "https://api.telegram.org/botbiz-token-77/sendMessage"
+
+
+@pytest.mark.django_db
+@override_settings(TELEGRAM_BOT_TOKEN="global-token")
+def test_telegram_transport_falls_back_to_global_token(business):
+    # business.telegram_bot_token остаётся пустым по умолчанию.
+    assert business.telegram_bot_token == ""
+    transport = TelegramTransport(business=business)
+    request = transport.build_request(
+        recipient="800001",
+        text="hi",
+        metadata=None,
+    )
+
+    assert request["url"] == "https://api.telegram.org/botglobal-token/sendMessage"
+
+
+@pytest.mark.django_db
+@override_settings(TELEGRAM_BOT_TOKEN="")
+def test_telegram_transport_raises_when_no_token_anywhere(business):
+    business.telegram_bot_token = ""
+    business.save(update_fields=["telegram_bot_token", "updated_at"])
+    transport = TelegramTransport(business=business)
+    with pytest.raises(ValueError):
+        transport.build_request(
+            recipient="800001",
+            text="hi",
+            metadata=None,
+        )

@@ -851,6 +851,26 @@ class BusinessAdmin(TenantScopedAdminMixin, ModelAdmin):
             },
         ),
         (
+            "Telegram",
+            {
+                "fields": (
+                    "telegram_bot_token",
+                    "telegram_webhook_secret",
+                ),
+                "description": (
+                    "Per-business Telegram credentials. bot_token — из "
+                    "BotFather, используется для исходящих сообщений. "
+                    "webhook_secret — часть URL вида /api/v1/webhooks/"
+                    "telegram/<business_id>/<secret>/, при настройке бота "
+                    "в BotFather. Пара (business_id, secret) обязана "
+                    "совпадать одновременно — иначе webhook отклоняется. "
+                    "Пусто в обоих полях — fallback на глобальные "
+                    "TELEGRAM_* (deprecated)."
+                ),
+                "classes": ("collapse",),
+            },
+        ),
+        (
             "Статус",
             {"fields": ("is_active",)},
         ),

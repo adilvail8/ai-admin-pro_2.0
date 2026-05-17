@@ -213,6 +213,10 @@ class WhatsAppTransport(HTTPTransportBase):
 class TelegramTransport(HTTPTransportBase):
     channel = "telegram"
 
+    def __init__(self, *, business=None, timeout_seconds: int | None = None):
+        super().__init__(timeout_seconds=timeout_seconds)
+        self.business = business
+
     @staticmethod
     def normalize_chat_id(recipient: str) -> str:
         normalized = recipient.strip()
@@ -220,11 +224,27 @@ class TelegramTransport(HTTPTransportBase):
             return normalized.removeprefix("tg:")
         return normalized
 
-    def build_request(self, *, recipient: str, text: str, metadata: dict | None):
+    def _resolve_bot_token(self) -> str:
+        """Достать bot_token: per-business если заполнен, иначе global
+        с логгированным warning'ом (deprecated, hard-fail post-deploy)."""
+        if self.business is not None:
+            token = (self.business.telegram_bot_token or "").strip()
+            if token:
+                return token
+            logger.warning(
+                "telegram_global_fallback",
+                extra={
+                    "business_id": getattr(self.business, "id", None),
+                    "reason": "per_business_token_empty",
+                },
+            )
         if not settings.TELEGRAM_BOT_TOKEN:
             raise ValueError("TELEGRAM_BOT_TOKEN is not configured.")
+        return settings.TELEGRAM_BOT_TOKEN
 
-        url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/sendMessage"
+    def build_request(self, *, recipient: str, text: str, metadata: dict | None):
+        bot_token = self._resolve_bot_token()
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
         return {
             "url": url,
             "json": {
@@ -328,12 +348,13 @@ class InternalAlertTransport(HTTPTransportBase):
 
 
 def get_transport_for_channel(channel: str, *, business=None) -> OutboundTransport:
-    """Factory: для whatsapp прокидываем business чтобы транспорт мог
-    взять per-business Green-API credentials. Для telegram/internal
-    business игнорируется (credentials глобальные)."""
+    """Factory: для whatsapp и telegram прокидываем business чтобы
+    транспорт мог взять per-business credentials. Для internal —
+    business игнорируется (глобальный канал для алертов админам,
+    не клиентам)."""
     transports: dict[str, OutboundTransport] = {
         "whatsapp": WhatsAppTransport(business=business),
-        "telegram": TelegramTransport(),
+        "telegram": TelegramTransport(business=business),
         "internal": InternalAlertTransport(),
     }
     return transports.get(channel, WhatsAppTransport(business=business))

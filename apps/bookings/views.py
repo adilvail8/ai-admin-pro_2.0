@@ -57,7 +57,8 @@ from .webhooks import (
     detect_client_language,
     get_localized_runtime_message,
     verify_green_api_request,
-    verify_telegram_secret,
+    verify_telegram_request,
+    verify_telegram_secret,  # kept as deprecated alias for external callers
     verify_webhook_token,
 )
 
@@ -391,7 +392,7 @@ def messenger_webhook(request):
 @require_POST
 def telegram_webhook(request, business_id: int, secret: str):
     try:
-        verify_telegram_secret(secret)
+        verify_telegram_request(business_id=business_id, secret=secret)
     except ValidationError as error:
         return JsonResponse({"detail": str(error)}, status=403)
 

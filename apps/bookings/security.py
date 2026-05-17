@@ -27,11 +27,62 @@ def verify_webhook_token(token: str):
 
 
 def verify_telegram_secret(secret: str):
+    """Legacy global-only verifier — kept as a deprecated alias.
+
+    New code should call ``verify_telegram_request(business_id=..., secret=...)``
+    which also accepts per-business secrets. This helper stays so external
+    callers (e.g. one-off scripts) don't break; it will be removed together
+    with the green-api whitelist cleanup once messenger_webhook is audited.
+    """
     expected_secret = settings.TELEGRAM_WEBHOOK_SECRET
     if not expected_secret:
         raise ValidationError("Telegram webhook secret is not configured.")
     if secret != expected_secret:
         raise ValidationError("Invalid Telegram webhook secret.")
+
+
+def verify_telegram_request(*, business_id: int, secret: str):
+    """Принимает Telegram webhook на ``/telegram/<business_id>/<secret>/``.
+
+    Порядок проверок:
+
+    1. Per-business path: ищем активный ``Business`` с одновременно
+       совпадающими ``id=business_id`` и ``telegram_webhook_secret=secret``.
+       Если есть — webhook принят, возвращаем этот Business.
+
+    2. Global fallback (deprecated): если у Business нет per-business
+       secret'а, но переданный совпадает с ``settings.TELEGRAM_WEBHOOK_SECRET``,
+       webhook принят. Возвращаем ``None`` чтобы вызывающий код мог понять,
+       что сработал fallback (логирование/метрики).
+
+    3. Иначе — ``ValidationError``.
+
+    Cross-check (id + secret в одной записи) обязателен: атакующий,
+    знающий secret salon-А, не сможет постить webhook на URL salon-Б —
+    lookup ``(id=B, secret=A_secret)`` ничего не вернёт.
+
+    Импорт ``Business`` локальный, чтобы избежать циклов на старте app'ов.
+    """
+    from .models import Business  # pragma: no cover — import boundary
+
+    if secret:
+        per_business = (
+            Business.objects.filter(
+                pk=business_id,
+                is_active=True,
+                telegram_webhook_secret=secret,
+            )
+            .exclude(telegram_webhook_secret="")
+            .first()
+        )
+        if per_business is not None:
+            return per_business
+
+    global_secret = settings.TELEGRAM_WEBHOOK_SECRET
+    if global_secret and secret == global_secret:
+        return None
+
+    raise ValidationError("Invalid Telegram webhook secret.")
 
 
 def verify_green_api_request(

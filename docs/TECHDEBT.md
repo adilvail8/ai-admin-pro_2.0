@@ -31,32 +31,25 @@ business_id в payload больше невозможна — он игнорир
 - Health-check на смешанное состояние (часть Business с creds, часть
   без) — отдельной задачей.
 
-### 12. Per-business Telegram credentials — **OPEN, post-deploy**
+### 12. ~~Per-business Telegram credentials~~ — **ЗАКРЫТО 2026-05-18**
 
-Аналог пункта 1 (Green-API) для Telegram. Сейчас весь Telegram трафик
-ходит через единый `settings.TELEGRAM_BOT_TOKEN` + единый
-`TELEGRAM_WEBHOOK_SECRET`. Если у второго салона свой бот в BotFather —
-поддержки нет: оба бота шлют webhook'и на наш URL, а валидация
-`verify_telegram_secret` не различает их по business.
+Зеркало пункта 1 (Green-API) для Telegram. Поля
+`Business.telegram_bot_token` и `Business.telegram_webhook_secret`
+(миграция 0021 + partial UniqueConstraint на secret). Inbound
+`telegram_webhook(business_id, secret)` пропускает запрос только
+если пара `(id, secret)` совпадает с одной записью Business (либо
+если secret совпадает с глобальным `TELEGRAM_WEBHOOK_SECRET` —
+deprecated fallback). Outbound `TelegramTransport(business=…)` берёт
+`bot_token` из Business либо global fallback с warning'ом. Логика
+полностью симметрична `WhatsAppTransport`.
 
-**Объём:**
-- Поля `Business.telegram_bot_token` (CharField, blank=True) и
-  `Business.telegram_webhook_secret` (CharField, blank=True).
-- Миграция 0021 + partial UniqueConstraint на `telegram_webhook_secret`.
-- `telegram_webhook(business_id, secret)` — lookup в Business по
-  паре `(business_id, telegram_webhook_secret)`; если у Business
-  поля пусты — fallback на глобальный `settings.TELEGRAM_*` (как
-  сейчас, deprecated).
-- Outbound `TelegramTransport(business=…)` берёт `bot_token` из
-  Business либо global fallback. Зеркало логики `WhatsAppTransport`.
-- BusinessAdmin fieldset «Telegram» — два поля под коллапсом.
-- Тесты: изоляция салонов по токену (события чужого бота отклоняются),
-  outbound с per-business токеном, fallback на глобальный, partial
-  credentials → ValueError.
-
-**Зависимости:** копирует архитектуру коммита `1a4db39` (WhatsApp
-per-business). Tech-debt `api_token plaintext` (пункт 1) распространится
-на Telegram-токен — закрыть оба шифрованием одной задачей.
+**Остаточный долг (общий с пунктом 1):**
+- `telegram_bot_token` plaintext в БД — закрыть шифрованием вместе с
+  `green_api_api_token`.
+- Глобальные `TELEGRAM_BOT_TOKEN`/`TELEGRAM_WEBHOOK_SECRET` в env —
+  hard-fail когда все salons мигрируют на per-business.
+- `hmac.compare_digest` для secret-сравнений — отдельный мелкий пункт,
+  применить к verify_telegram_request и verify_green_api_request за раз.
 
 ---
 

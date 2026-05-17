@@ -98,6 +98,31 @@ class Business(TimeStampedModel):
         ),
     )
 
+    telegram_bot_token = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text=_(
+            "Per-business Telegram bot token (из BotFather). Используется "
+            "для отправки исходящих сообщений именно с этого бота. "
+            "Пусто = откатиться на глобальный settings.TELEGRAM_BOT_TOKEN "
+            "(deprecated). Plaintext в БД (тех-долг — шифрование вместе с "
+            "green_api_api_token после деплоя)."
+        ),
+    )
+    telegram_webhook_secret = models.CharField(
+        max_length=128,
+        blank=True,
+        default="",
+        help_text=_(
+            "Per-business secret для входящих Telegram webhook'ов. URL "
+            "/api/v1/webhooks/telegram/<business_id>/<secret>/ принимается "
+            "только если пара (id, secret) совпадает с этой записью. "
+            "Пусто = откатиться на settings.TELEGRAM_WEBHOOK_SECRET "
+            "(deprecated)."
+        ),
+    )
+
     class Meta:
         ordering = ("name",)
         verbose_name = _("business")
@@ -107,6 +132,11 @@ class Business(TimeStampedModel):
                 fields=("green_api_instance_id",),
                 condition=~models.Q(green_api_instance_id=""),
                 name="uniq_business_green_api_instance_id",
+            ),
+            models.UniqueConstraint(
+                fields=("telegram_webhook_secret",),
+                condition=~models.Q(telegram_webhook_secret=""),
+                name="uniq_business_telegram_webhook_secret",
             ),
         ]
 
