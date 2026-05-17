@@ -222,12 +222,20 @@ def get_client_active_bookings(*, business_id: int, client: Client) -> list[Book
     Used by the cancellation flow — we only let the client cancel bookings
     that haven't started yet. Ordered by start_time ascending so the
     numbered list shown to the client reads chronologically.
+
+    NEEDS_ATTENTION is treated as active here: the booking is still a real
+    future appointment, just flagged for the operator. The client must be
+    able to self-cancel it through the bot (UX product decision).
     """
     return list(
         Booking.objects.filter(
             business_id=business_id,
             client=client,
-            status__in=[Booking.Status.PENDING, Booking.Status.CONFIRMED],
+            status__in=[
+                Booking.Status.PENDING,
+                Booking.Status.CONFIRMED,
+                Booking.Status.NEEDS_ATTENTION,
+            ],
             start_time__gt=timezone.now(),
         )
         .select_related("service", "master")

@@ -5726,6 +5726,35 @@ def test_get_client_active_bookings_returns_future_pending_and_confirmed(
     assert [b.id for b in result] == [near.id, far.id]
 
 
+@pytest.mark.django_db
+def test_get_client_active_bookings_includes_needs_attention(
+    business,
+    client_profile,
+    master,
+    service,
+):
+    """NEEDS_ATTENTION is still a real future booking — just flagged
+    for the operator. The client must be able to self-cancel it
+    through the bot; otherwise a booking the bot escalated to a human
+    becomes uncancellable from the client side."""
+    now = timezone.now()
+    flagged = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=now + timedelta(days=3),
+        client_data={"name": "Aigerim"},
+        status=Booking.Status.NEEDS_ATTENTION,
+    )
+
+    result = get_client_active_bookings(
+        business_id=business.id, client=client_profile
+    )
+
+    assert flagged.id in [b.id for b in result]
+
+
 def test_build_cancellation_no_active_bookings_reply_localized():
     ru_reply = build_cancellation_no_active_bookings_reply(language="ru")
     kz_reply = build_cancellation_no_active_bookings_reply(language="kz")
@@ -8988,6 +9017,50 @@ def xest_owner_gets_salon_scoped_sidebar_and_branding_mojibake_duplicate(
     assert site_header_callback(request) == business_membership.business.display_brand_name
     assert site_title_callback(request) == f"{business_membership.business.display_brand_name} | кабинет салона"
     assert site_subheader_callback(request) == f"{business_membership.business.city} · кабинет салона"
+
+
+@pytest.mark.django_db
+def test_infer_service_prefers_exact_name_match_over_generic_haircut(business):
+    """Bug fix regression: a client saying «фейд-стрижка» must match the
+    Fade Haircut service, not Men's Haircut. Previously the generic
+    "стриж" fallback (triggered by any "haircut"-named service) caused
+    the alphabetically-first service to win — so depending on which
+    haircut services existed, the wrong one would be picked.
+
+    Pass 1 of infer_service_from_messages now scans for a full
+    service-name substring before falling back to short aliases.
+    """
+    fade_service = Service.objects.create(
+        business=business,
+        name="Fade Haircut",
+        price=Decimal("9000"),
+        duration=timedelta(minutes=75),
+    )
+    Service.objects.create(
+        business=business,
+        name="Men's Haircut",
+        price=Decimal("7000"),
+        duration=timedelta(minutes=60),
+    )
+
+    # User uses the term explicitly — full service name appears in the
+    # message ("fade haircut" is a literal substring of "fade haircut...").
+    inferred = infer_service_from_messages(
+        business=business,
+        texts=["хочу fade haircut пожалуйста"],
+    )
+    assert inferred == fade_service
+
+    # And the reverse: a plain "стрижка" without "фейд" should NOT
+    # accidentally lock onto Fade Haircut just because it's first
+    # alphabetically — generic haircut request falls through to Pass 2.
+    generic = infer_service_from_messages(
+        business=business,
+        texts=["хочу мужскую стрижку"],
+    )
+    assert generic is not None  # should pick one of the two; either is fine
+    # The "мужск" alias steers Men's Haircut explicitly.
+    assert generic.name == "Men's Haircut"
 
 
 @pytest.mark.django_db

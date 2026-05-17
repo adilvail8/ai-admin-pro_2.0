@@ -64,6 +64,32 @@ def infer_service_from_messages(*, business: Business, texts: list[str]):
             if not any(marker in text for marker in beard_markers):
                 return mens_haircut_service
 
+    # Pass 1 — specific match: текст содержит подстроку самого имени
+    # сервиса (или его локализованной формы). Это закрывает баг, когда
+    # «фейд-стрижка» матчилось на первую попавшуюся haircut-услугу из
+    # services (отсортированы по алфавиту), а не на ту, чьё имя реально
+    # упомянуто. Сначала ищем точное вхождение по полному имени
+    # сервиса, и только если ни одно полное имя не найдено — падаем
+    # в общий fallback (Pass 2 ниже) с короткими aliases.
+    for text in reversed(normalized_texts):
+        best_match = None
+        best_len = 0
+        for service in services:
+            specific_variants = {
+                service.name.lower(),
+                localize_service_name(service.name, "ru").lower(),
+                localize_service_name(service.name, "kz").lower(),
+            }
+            specific_variants.discard("")
+            for variant in specific_variants:
+                # Минимум 4 символа, чтобы «hair» не матчился на любой
+                # сервис со словом «hair».
+                if len(variant) >= 4 and variant in text and len(variant) > best_len:
+                    best_match = service
+                    best_len = len(variant)
+        if best_match is not None:
+            return best_match
+
     service_aliases = {
         "Women's Haircut": ("женск", "әйел", "айел"),
         "Men's Haircut": ("мужск", "кроп", "barber"),
