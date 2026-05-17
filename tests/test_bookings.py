@@ -6930,12 +6930,17 @@ def test_telegram_webhook_routes_voice_event_through_internal_event_dispatch(
     GREEN_API_ALLOWED_IPS=["127.0.0.1"],
 )
 def test_green_api_webhook_checks_secret_and_ip(client, business, monkeypatch):
-    def fake_handle_text_message(**kwargs):
-        return {"reply": "Здравствуйте!", "escalated": False}
+    """Auth handshake regression: valid X-GreenAPI-Secret + allowed IP
+    must pass auth and reach payload-shape check (which now rejects
+    internal payloads at this endpoint — different from 403 on bad
+    auth). Bad secret / IP would short-circuit at 403."""
+
+    def must_not_run(**kwargs):  # pragma: no cover
+        raise AssertionError("handler must not run for closed fallback")
 
     monkeypatch.setattr(
         "apps.bookings.views.handle_text_message",
-        fake_handle_text_message,
+        must_not_run,
     )
 
     response = client.post(
@@ -6955,7 +6960,10 @@ def test_green_api_webhook_checks_secret_and_ip(client, business, monkeypatch):
         REMOTE_ADDR="127.0.0.1",
     )
 
-    assert response.status_code == 200
+    # 400 (not 403): auth passed, payload-shape rejected the legacy
+    # internal-payload fallback. A 403 here would indicate broken auth.
+    assert response.status_code == 400
+    assert "/api/v1/webhooks/whatsapp/" in response.json()["detail"]
 
 
 @pytest.mark.django_db
@@ -6968,12 +6976,16 @@ def test_green_api_webhook_accepts_authorization_bearer_token(
     business,
     monkeypatch,
 ):
-    def fake_handle_text_message(**kwargs):
-        return {"reply": "Здравствуйте!", "escalated": False}
+    """Auth handshake regression for `Authorization: Bearer …`. Same as
+    the X-GreenAPI-Secret variant: valid header passes auth and falls
+    through to the closed legacy fallback (400, not 403)."""
+
+    def must_not_run(**kwargs):  # pragma: no cover
+        raise AssertionError("handler must not run for closed fallback")
 
     monkeypatch.setattr(
         "apps.bookings.views.handle_text_message",
-        fake_handle_text_message,
+        must_not_run,
     )
 
     response = client.post(
@@ -6993,29 +7005,32 @@ def test_green_api_webhook_accepts_authorization_bearer_token(
         REMOTE_ADDR="127.0.0.1",
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 400
+    assert "/api/v1/webhooks/whatsapp/" in response.json()["detail"]
 
 
 @pytest.mark.django_db
 @override_settings(
     GREEN_API_SHARED_SECRET="green-secret",
     GREEN_API_ALLOWED_IPS=["127.0.0.1"],
-    GREEN_API_BUSINESS_IDS=[999_999],
 )
-def test_green_api_webhook_rejects_business_id_outside_whitelist(
+def test_green_api_webhook_rejects_legacy_internal_payload(
     client,
     business,
     monkeypatch,
 ):
-    """When GREEN_API_BUSINESS_IDS is configured, webhooks for other ids are rejected.
+    """Legacy internal-payload fallback at /webhook/green-api/ is closed.
 
-    Closes the legacy multi-tenancy hole where any caller knowing
-    GREEN_API_SHARED_SECRET could submit a webhook with an arbitrary
-    business_id and impersonate that salon.
+    Previously the only protection on this branch was the
+    GREEN_API_BUSINESS_IDS whitelist; routing-by-idInstance is impossible
+    without a provider payload. Real Green-API traffic always carries
+    provider fields, so closing the branch removes a forge-able route
+    without affecting prod clients. Internal-payload senders must use
+    /api/v1/webhooks/whatsapp/<business_id>/ instead.
     """
 
     def fake_handle_text_message(**kwargs):  # pragma: no cover — must not be reached
-        raise AssertionError("handler must not run for rejected business_id")
+        raise AssertionError("handler must not run for closed fallback")
 
     monkeypatch.setattr(
         "apps.bookings.views.handle_text_message",
@@ -7040,7 +7055,7 @@ def test_green_api_webhook_rejects_business_id_outside_whitelist(
     )
 
     assert response.status_code == 400
-    assert "business_id" in response.json()["detail"]
+    assert "/api/v1/webhooks/whatsapp/" in response.json()["detail"]
 
 
 @pytest.mark.django_db

@@ -21,8 +21,13 @@ business_id в payload больше невозможна — он игнорир
 - Глобальные `GREEN_API_INSTANCE_ID/API_TOKEN/URL` в env оставлены как
   fallback с warning'ом. Hard-fail когда все живые salons мигрируют
   на per-business creds.
-- `GREEN_API_BUSINESS_IDS` whitelist оставлен как back-stop. Удалить
-  отдельной задачей.
+- `GREEN_API_BUSINESS_IDS` whitelist оставлен как back-stop для
+  `messenger_webhook` (legacy internal-payload entry point). Green-API
+  fallback в `green_api_webhook` закрыт 2026-05-17.
+- `messenger_webhook` (`/api/v1/webhooks/messenger/`) — выяснить нужен
+  ли в проде. Если нет — закрыть + удалить `GREEN_API_BUSINESS_IDS` и
+  `validate_green_api_business_id` целиком. Если да — заменить
+  whitelist на tenant-scoped токены.
 - Health-check на смешанное состояние (часть Business с creds, часть
   без) — отдельной задачей.
 

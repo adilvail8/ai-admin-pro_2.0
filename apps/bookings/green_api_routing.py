@@ -9,6 +9,10 @@
 ``instanceData.idInstance`` из payload через уникальное поле
 ``Business.green_api_instance_id``. URL/query — лишь для совместимости
 с существующим роутингом; они сверяются с результатом lookup.
+
+Legacy internal-payload fallback на ``/api/v1/webhooks/green-api/``
+(когда payload не содержит provider-поля) закрыт — он отдаёт 400
+с подсказкой переехать на ``/api/v1/webhooks/whatsapp/<business_id>/``.
 """
 
 from __future__ import annotations

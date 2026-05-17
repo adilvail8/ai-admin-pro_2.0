@@ -381,18 +381,26 @@ def green_api_webhook(request):
 
     try:
         payload = parse_request_payload(request)
-        if is_green_api_provider_payload(payload):
-            event = normalize_incoming_event(
-                ConversationMessage.Channel.WHATSAPP,
-                payload,
-                extract_green_api_business_id(payload=payload, request=request),
+        if not is_green_api_provider_payload(payload):
+            # Legacy internal-payload fallback (когда сюда прилетал наш
+            # собственный формат `{business_id, external_id, phone, ...}`)
+            # больше не принимается: единственная защита там — whitelist
+            # GREEN_API_BUSINESS_IDS, а маршрутизация по уже привязанному
+            # idInstance невозможна без provider payload. Реальные
+            # Green-API клиенты всегда шлют provider payload — закрытие
+            # ветки не ломает их. Для internal payloads используется
+            # /api/v1/webhooks/whatsapp/<business_id>/.
+            raise ValidationError(
+                "Legacy internal payload at /api/v1/webhooks/green-api/ is "
+                "no longer accepted. Use /api/v1/webhooks/whatsapp/"
+                "<business_id>/ instead."
             )
-            return process_internal_event(event=event, request=request)
-        return process_webhook_request(
-            payload=payload,
-            request=request,
-            channel=ConversationMessage.Channel.WHATSAPP,
+        event = normalize_incoming_event(
+            ConversationMessage.Channel.WHATSAPP,
+            payload,
+            extract_green_api_business_id(payload=payload, request=request),
         )
+        return process_internal_event(event=event, request=request)
     except (KeyError, ValueError, ValidationError, json.JSONDecodeError) as error:
         return JsonResponse({"detail": str(error)}, status=400)
 
