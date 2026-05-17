@@ -10762,3 +10762,89 @@ def test_colored_active_returns_tuple_for_badge_rendering(business, master, serv
         obj.is_active = False
         result = admin_instance.colored_active(obj)
         assert result == (False, inactive_word)
+
+
+# ---------------------------------------------------------------------------
+# Outbound reply deduplication regression
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+@override_settings(WEBHOOK_SHARED_SECRET="secret-token")
+def test_outbound_reply_dedupes_within_window(client, business, monkeypatch):
+    """Two inbound webhooks with the SAME content arriving within 30s
+    (Green-API retry of a slow ack, Telegram update + edit, Celery
+    worker race) must not produce two identical outgoing replies.
+    register_inbound_event guards against same provider_event_id, but
+    a retry can come in with a fresh event id — content-level guard
+    closes that hole."""
+
+    dispatched_ids: list[int] = []
+
+    def fake_handle_text_message(**kwargs):
+        return {"reply": "Здравствуйте, ответ один.", "escalated": False}
+
+    monkeypatch.setattr(
+        "apps.bookings.views.handle_text_message",
+        fake_handle_text_message,
+    )
+    monkeypatch.setattr(
+        "apps.bookings.views.dispatch_outbound_delivery",
+        lambda outbound_message_id: dispatched_ids.append(outbound_message_id)
+        or {"outbound_message_id": outbound_message_id, "status": OutboundMessage.Status.QUEUED},
+    )
+
+    payload_template = {
+        "business_id": business.id,
+        "channel": "whatsapp",
+        "external_id": "wa-dedupe",
+        "phone": "+77079999001",
+        "name": "Dedupe User",
+        "text": "Сколько стоит стрижка?",
+    }
+
+    # First request — creates a fresh OutboundMessage.
+    first = client.post(
+        "/api/v1/webhooks/messenger/",
+        data=json.dumps({**payload_template, "provider_event_id": "evt-dedupe-1"}),
+        content_type="application/json",
+        HTTP_X_WEBHOOK_TOKEN="secret-token",
+    )
+    assert first.status_code == 200
+    assert first.json().get("reply") == "Здравствуйте, ответ один."
+    assert first.json().get("deduped") is not True
+
+    outbound = OutboundMessage.objects.get(
+        business=business,
+        channel="whatsapp",
+        message_type="reply",
+    )
+    assert dispatched_ids == [outbound.id]
+
+    # Second request — same content, different provider_event_id (retry).
+    second = client.post(
+        "/api/v1/webhooks/messenger/",
+        data=json.dumps({**payload_template, "provider_event_id": "evt-dedupe-2"}),
+        content_type="application/json",
+        HTTP_X_WEBHOOK_TOKEN="secret-token",
+    )
+    assert second.status_code == 200
+    assert second.json().get("deduped") is True
+    # The reply key is preserved so the client still sees a sensible
+    # success response, but no NEW OutboundMessage gets created.
+    assert (
+        OutboundMessage.objects.filter(
+            business=business,
+            channel="whatsapp",
+            message_type="reply",
+        ).count()
+        == 1
+    )
+    # And the second dispatch did NOT happen.
+    assert dispatched_ids == [outbound.id]
+    # An audit-log entry was written so the dedup is visible in ops.
+    assert AuditLog.objects.filter(
+        business=business,
+        outbound_message=outbound,
+        event_type="outbound_reply_skipped_duplicate",
+    ).exists()

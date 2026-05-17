@@ -1,4 +1,5 @@
 import json
+from datetime import timedelta
 from hashlib import sha256
 
 import httpx
@@ -277,30 +278,68 @@ def process_webhook_request(*, payload: dict, request, channel: str):
         if isinstance(result, dict):
             reply_text = (result.get("reply", "") or "").strip()
             if reply_text:
-                outbound_message = OutboundMessage.objects.create(
-                    business=business,
-                    client=client,
-                    channel=channel,
-                    recipient=get_client_recipient(client, channel),
-                    message_type="reply",
-                    text=reply_text,
-                )
-                create_audit_log(
-                    business=business,
-                    client=client,
-                    outbound_message=outbound_message,
-                    actor_type="ai",
-                    event_type="outbound_reply_queued",
-                    channel=channel,
-                    payload={"message_type": "reply"},
-                )
-                dispatch_result = dispatch_outbound_delivery(outbound_message.id)
-                result.setdefault("outbound_message_id", outbound_message.id)
-                if isinstance(dispatch_result, dict) and dispatch_result.get("status"):
-                    result.setdefault(
-                        "notification_status",
-                        dispatch_result["status"],
+                # Idempotency guard: same client receiving the exact same
+                # reply text within a short window almost always means a
+                # duplicate dispatch — Green-API retrying a slow webhook
+                # ack, a Telegram update + edit, or a Celery race. Skip
+                # silently; the first OutboundMessage already covers this
+                # response. register_inbound_event filters identical
+                # provider_event_ids but doesn't catch retries that come
+                # in with a fresh event id, hence this content-level guard.
+                recent_window = timezone.now() - timedelta(seconds=30)
+                duplicate = (
+                    OutboundMessage.objects.filter(
+                        business=business,
+                        client=client,
+                        channel=channel,
+                        message_type="reply",
+                        text=reply_text,
+                        created_at__gte=recent_window,
                     )
+                    .order_by("-created_at")
+                    .first()
+                )
+                if duplicate is not None:
+                    create_audit_log(
+                        business=business,
+                        client=client,
+                        outbound_message=duplicate,
+                        actor_type="system",
+                        event_type="outbound_reply_skipped_duplicate",
+                        channel=channel,
+                        payload={
+                            "inbound_event_id": inbound_event.id,
+                            "original_outbound_id": duplicate.id,
+                            "window_seconds": 30,
+                        },
+                    )
+                    result.setdefault("outbound_message_id", duplicate.id)
+                    result["deduped"] = True
+                else:
+                    outbound_message = OutboundMessage.objects.create(
+                        business=business,
+                        client=client,
+                        channel=channel,
+                        recipient=get_client_recipient(client, channel),
+                        message_type="reply",
+                        text=reply_text,
+                    )
+                    create_audit_log(
+                        business=business,
+                        client=client,
+                        outbound_message=outbound_message,
+                        actor_type="ai",
+                        event_type="outbound_reply_queued",
+                        channel=channel,
+                        payload={"message_type": "reply"},
+                    )
+                    dispatch_result = dispatch_outbound_delivery(outbound_message.id)
+                    result.setdefault("outbound_message_id", outbound_message.id)
+                    if isinstance(dispatch_result, dict) and dispatch_result.get("status"):
+                        result.setdefault(
+                            "notification_status",
+                            dispatch_result["status"],
+                        )
         mark_inbound_event_processed(inbound_event)
         return JsonResponse(result, status=200)
     except Exception:

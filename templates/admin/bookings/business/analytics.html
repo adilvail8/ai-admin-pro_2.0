@@ -3,178 +3,192 @@
 {% block title %}{{ title }}{% endblock %}
 
 {% block content %}
-  <div class="analytics-page" style="max-width: 1100px;">
-    <h1 style="margin: 0 0 6px 0;">{{ title }}</h1>
-    <p style="color: #6b7280; margin: 0 0 20px 0;">
+  {#
+    Аналитика салона. Стили — Tailwind utility classes с dark: вариантами,
+    которые Unfold подтягивает автоматически. Inline styles избегаем,
+    чтобы тёмная тема ловилась через единый toggle на <html>.
+
+    Палитра:
+      Карточка     bg-white dark:bg-base-900
+      Граница      border-base-200 dark:border-base-700
+      Заголовок    text-base-900 dark:text-base-100
+      Метка        text-base-500 dark:text-base-400
+      Цифра        text-base-900 dark:text-white
+      Линия акцент border-l-4 (цвет per-card)
+  #}
+
+  <div class="max-w-[1100px] mx-auto">
+    <h1 class="text-2xl font-semibold text-base-900 dark:text-white m-0 mb-1.5">{{ title }}</h1>
+    <p class="text-sm text-base-500 dark:text-base-400 m-0 mb-5">
       Записи, конверсия, загрузка мастеров и выручка за выбранный период.
     </p>
 
     {# Period selector tabs #}
-    <div class="period-selector" style="display: flex; gap: 8px; margin-bottom: 24px; border-bottom: 1px solid #e5e7eb; padding-bottom: 12px;">
+    <div class="flex gap-2 mb-6 border-b border-base-200 dark:border-base-700 pb-3">
       {% for value, label in period_options %}
         {% if value == selected_period %}
           <a href="?period={{ value }}"
-             style="padding: 6px 14px; border-radius: 6px; background: #2563eb; color: #fff; text-decoration: none; font-weight: 500; font-size: 13px;">
+             class="px-3.5 py-1.5 rounded-md bg-primary-600 text-white font-medium text-[13px] no-underline hover:bg-primary-700">
             {{ label }}
           </a>
         {% else %}
           <a href="?period={{ value }}"
-             style="padding: 6px 14px; border-radius: 6px; background: #f3f4f6; color: #374151; text-decoration: none; font-size: 13px;">
+             class="px-3.5 py-1.5 rounded-md bg-base-100 dark:bg-base-800 text-base-700 dark:text-base-300 text-[13px] no-underline hover:bg-base-200 dark:hover:bg-base-700">
             {{ label }}
           </a>
         {% endif %}
       {% endfor %}
     </div>
 
-    {# Scope banner (super_admin sees all businesses, owner sees own) #}
+    {# Scope banner #}
     {% if businesses|length > 1 %}
-      <div style="font-size: 12px; color: #6b7280; margin-bottom: 16px;">
+      <div class="text-xs text-base-500 dark:text-base-400 mb-4">
         Видимые бизнесы:
-        {% for b in businesses %}<span style="display: inline-block; padding: 2px 8px; background: #f3f4f6; border-radius: 4px; margin-right: 4px;">{{ b.name }}</span>{% endfor %}
+        {% for b in businesses %}
+          <span class="inline-block px-2 py-0.5 bg-base-100 dark:bg-base-800 rounded mr-1 text-base-700 dark:text-base-300">{{ b.name }}</span>
+        {% endfor %}
       </div>
     {% elif businesses|length == 1 %}
-      <div style="font-size: 12px; color: #6b7280; margin-bottom: 16px;">
-        Салон: <strong>{{ businesses.0.name }}</strong>
+      <div class="text-xs text-base-500 dark:text-base-400 mb-4">
+        Салон: <strong class="text-base-800 dark:text-base-200">{{ businesses.0.name }}</strong>
       </div>
     {% else %}
-      <div style="font-size: 13px; color: #b91c1c;">
+      <div class="text-sm text-red-600 dark:text-red-400 mb-4">
         Нет доступных бизнесов для отображения.
       </div>
     {% endif %}
 
     {# KPI cards #}
-    <div class="analytics-kpi-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 24px;">
+    <div class="grid gap-4 mb-6" style="grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));">
       {% for card in kpi_cards %}
-        <div class="analytics-kpi-card" style="background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 18px;
-            border-left: 4px solid {% if card.tone == 'green' %}#10b981{% elif card.tone == 'red' %}#ef4444{% elif card.tone == 'amber' %}#f59e0b{% else %}#6b7280{% endif %};">
-          <div style="font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px;">
+        <div class="bg-white dark:bg-base-900 border border-base-200 dark:border-base-700 rounded-lg p-[18px]
+                    {% if card.tone == 'green' %}border-l-4 border-l-green-500
+                    {% elif card.tone == 'red' %}border-l-4 border-l-red-500
+                    {% elif card.tone == 'amber' %}border-l-4 border-l-amber-500
+                    {% else %}border-l-4 border-l-base-500{% endif %}">
+          <div class="text-[11px] text-base-500 dark:text-base-400 uppercase tracking-wider mb-2">
             {{ card.label }}
           </div>
-          <div style="font-size: 28px; font-weight: 600; color: #111827; line-height: 1.2;">
+          <div class="text-[28px] font-semibold text-base-900 dark:text-white leading-tight">
             {{ card.value }}
           </div>
-          <div style="font-size: 12px; color: #9ca3af; margin-top: 4px;">
+          <div class="text-xs text-base-500 dark:text-base-500 mt-1">
             {{ card.subtitle }}
           </div>
         </div>
       {% endfor %}
     </div>
 
-    {# Conversion + repeat clients — single row of two callouts #}
-    <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 16px; margin-bottom: 24px;">
-
-      <div style="background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 18px; border-left: 4px solid #2563eb;">
-        <div style="font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px;">
+    {# Conversion + repeat clients — two callouts side-by-side #}
+    <div class="grid gap-4 mb-6" style="grid-template-columns: 2fr 1fr;">
+      <div class="bg-white dark:bg-base-900 border border-base-200 dark:border-base-700 border-l-4 border-l-primary-600 rounded-lg p-[18px]">
+        <div class="text-[11px] text-base-500 dark:text-base-400 uppercase tracking-wider mb-2">
           Конверсия: диалог → запись
         </div>
-        <div style="font-size: 28px; font-weight: 600; color: #111827; line-height: 1.2;">
+        <div class="text-[28px] font-semibold text-base-900 dark:text-white leading-tight">
           {{ conversion.rate }}%
         </div>
-        <div style="font-size: 13px; color: #6b7280; margin-top: 6px;">
+        <div class="text-[13px] text-base-500 dark:text-base-400 mt-1.5">
           {{ conversion.booked }} из {{ conversion.messaged }} клиентов записались
         </div>
       </div>
 
-      <div style="background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 18px; border-left: 4px solid #8b5cf6;">
-        <div style="font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px;">
+      <div class="bg-white dark:bg-base-900 border border-base-200 dark:border-base-700 border-l-4 border-l-violet-500 rounded-lg p-[18px]">
+        <div class="text-[11px] text-base-500 dark:text-base-400 uppercase tracking-wider mb-2">
           Повторные клиенты
         </div>
-        <div style="font-size: 28px; font-weight: 600; color: #111827; line-height: 1.2;">
+        <div class="text-[28px] font-semibold text-base-900 dark:text-white leading-tight">
           {{ repeat_clients.period }}
         </div>
-        <div style="font-size: 13px; color: #6b7280; margin-top: 6px;">
-          в&nbsp;периоде &middot; всего: <strong>{{ repeat_clients.lifetime }}</strong>
+        <div class="text-[13px] text-base-500 dark:text-base-400 mt-1.5">
+          в&nbsp;периоде &middot; всего: <strong class="text-base-800 dark:text-base-200">{{ repeat_clients.lifetime }}</strong>
         </div>
       </div>
-
     </div>
 
-    {# Breakdowns: top services / master workload / channels #}
-    <div class="analytics-breakdowns" style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px;">
-
-      {# Top services #}
-      <div style="background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px;">
-        <div style="font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 10px;">
+    {# Breakdowns: top services / master workload #}
+    <div class="grid grid-cols-2 gap-4 mb-4">
+      <div class="bg-white dark:bg-base-900 border border-base-200 dark:border-base-700 rounded-lg p-4">
+        <div class="text-[11px] text-base-500 dark:text-base-400 uppercase tracking-wider mb-2.5">
           Топ услуг
         </div>
         {% if top_services %}
-          <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+          <table class="w-full border-collapse text-[13px]">
             <thead>
-              <tr style="border-bottom: 1px solid #e5e7eb; text-align: left;">
-                <th style="padding: 6px 4px; font-weight: 500; color: #6b7280;">Услуга</th>
-                <th style="padding: 6px 4px; font-weight: 500; color: #6b7280; text-align: right;">Записей</th>
-                <th style="padding: 6px 4px; font-weight: 500; color: #6b7280; text-align: right;">Выручка ₸</th>
+              <tr class="border-b border-base-200 dark:border-base-700 text-left">
+                <th class="py-1.5 px-1 font-medium text-base-500 dark:text-base-400">Услуга</th>
+                <th class="py-1.5 px-1 font-medium text-base-500 dark:text-base-400 text-right">Записей</th>
+                <th class="py-1.5 px-1 font-medium text-base-500 dark:text-base-400 text-right">Выручка ₸</th>
               </tr>
             </thead>
             <tbody>
               {% for row in top_services %}
-                <tr style="border-bottom: 1px solid #f3f4f6;">
-                  <td style="padding: 6px 4px;">{{ row.service__name }}</td>
-                  <td style="padding: 6px 4px; text-align: right;">{{ row.count }}</td>
-                  <td style="padding: 6px 4px; text-align: right; font-weight: 500;">{{ row.revenue }}</td>
+                <tr class="border-b border-base-100 dark:border-base-800">
+                  <td class="py-1.5 px-1 text-base-900 dark:text-base-100">{{ row.service__name }}</td>
+                  <td class="py-1.5 px-1 text-right text-base-700 dark:text-base-300">{{ row.count }}</td>
+                  <td class="py-1.5 px-1 text-right font-medium text-base-900 dark:text-white">{{ row.revenue }}</td>
                 </tr>
               {% endfor %}
             </tbody>
           </table>
         {% else %}
-          <div style="color: #9ca3af; font-size: 13px;">Нет данных за период.</div>
+          <div class="text-base-400 dark:text-base-500 text-[13px]">Нет данных за период.</div>
         {% endif %}
       </div>
 
-      {# Master workload #}
-      <div style="background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px;">
-        <div style="font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 10px;">
+      <div class="bg-white dark:bg-base-900 border border-base-200 dark:border-base-700 rounded-lg p-4">
+        <div class="text-[11px] text-base-500 dark:text-base-400 uppercase tracking-wider mb-2.5">
           Загрузка мастеров
         </div>
         {% if master_workload %}
-          <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+          <table class="w-full border-collapse text-[13px]">
             <thead>
-              <tr style="border-bottom: 1px solid #e5e7eb; text-align: left;">
-                <th style="padding: 6px 4px; font-weight: 500; color: #6b7280;">Мастер</th>
-                <th style="padding: 6px 4px; font-weight: 500; color: #6b7280; text-align: right;">Всего</th>
-                <th style="padding: 6px 4px; font-weight: 500; color: #6b7280; text-align: right;">Подтв.</th>
+              <tr class="border-b border-base-200 dark:border-base-700 text-left">
+                <th class="py-1.5 px-1 font-medium text-base-500 dark:text-base-400">Мастер</th>
+                <th class="py-1.5 px-1 font-medium text-base-500 dark:text-base-400 text-right">Всего</th>
+                <th class="py-1.5 px-1 font-medium text-base-500 dark:text-base-400 text-right">Подтв.</th>
               </tr>
             </thead>
             <tbody>
               {% for row in master_workload %}
-                <tr style="border-bottom: 1px solid #f3f4f6;">
-                  <td style="padding: 6px 4px;">{{ row.master__full_name|default:"—" }}</td>
-                  <td style="padding: 6px 4px; text-align: right;">{{ row.count }}</td>
-                  <td style="padding: 6px 4px; text-align: right; color: #059669; font-weight: 500;">{{ row.confirmed }}</td>
+                <tr class="border-b border-base-100 dark:border-base-800">
+                  <td class="py-1.5 px-1 text-base-900 dark:text-base-100">{{ row.master__full_name|default:"—" }}</td>
+                  <td class="py-1.5 px-1 text-right text-base-700 dark:text-base-300">{{ row.count }}</td>
+                  <td class="py-1.5 px-1 text-right text-green-600 dark:text-green-400 font-medium">{{ row.confirmed }}</td>
                 </tr>
               {% endfor %}
             </tbody>
           </table>
         {% else %}
-          <div style="color: #9ca3af; font-size: 13px;">Нет данных за период.</div>
+          <div class="text-base-400 dark:text-base-500 text-[13px]">Нет данных за период.</div>
         {% endif %}
       </div>
     </div>
 
     {# Channel breakdown — full width #}
-    <div style="background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; margin-bottom: 24px;">
-      <div style="font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 10px;">
+    <div class="bg-white dark:bg-base-900 border border-base-200 dark:border-base-700 rounded-lg p-4 mb-6">
+      <div class="text-[11px] text-base-500 dark:text-base-400 uppercase tracking-wider mb-2.5">
         Каналы (входящие сообщения клиентов)
       </div>
       {% if channel_breakdown %}
-        <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+        <table class="w-full border-collapse text-[13px]">
           <thead>
-            <tr style="border-bottom: 1px solid #e5e7eb; text-align: left;">
-              <th style="padding: 6px 4px; font-weight: 500; color: #6b7280;">Канал</th>
-              <th style="padding: 6px 4px; font-weight: 500; color: #6b7280; text-align: right;">Сообщений</th>
+            <tr class="border-b border-base-200 dark:border-base-700 text-left">
+              <th class="py-1.5 px-1 font-medium text-base-500 dark:text-base-400">Канал</th>
+              <th class="py-1.5 px-1 font-medium text-base-500 dark:text-base-400 text-right">Сообщений</th>
             </tr>
           </thead>
           <tbody>
             {% for row in channel_breakdown %}
-              <tr style="border-bottom: 1px solid #f3f4f6;">
-                <td style="padding: 6px 4px;">{{ row.channel_label }}</td>
-                <td style="padding: 6px 4px; text-align: right; font-weight: 500;">{{ row.count }}</td>
+              <tr class="border-b border-base-100 dark:border-base-800">
+                <td class="py-1.5 px-1 text-base-900 dark:text-base-100">{{ row.channel_label }}</td>
+                <td class="py-1.5 px-1 text-right font-medium text-base-900 dark:text-white">{{ row.count }}</td>
               </tr>
             {% endfor %}
           </tbody>
         </table>
       {% else %}
-        <div style="color: #9ca3af; font-size: 13px;">Нет входящих сообщений за период.</div>
+        <div class="text-base-400 dark:text-base-500 text-[13px]">Нет входящих сообщений за период.</div>
       {% endif %}
     </div>
   </div>
