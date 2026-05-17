@@ -14,6 +14,10 @@ from django.utils.html import format_html
 from django.utils.module_loading import import_string
 from unfold.admin import ModelAdmin
 from unfold.decorators import display
+from unfold.widgets import (
+    UnfoldAdminSplitDateTimeWidget,
+    UnfoldAdminTextareaWidget,
+)
 
 from apps.accounts.models import BusinessMembership
 
@@ -1444,8 +1448,20 @@ class BookingAdminCreateForm(forms.ModelForm):
     class Meta:
         model = Booking
         fields = ("client", "master", "service", "start_time", "status", "notes")
+        labels = {
+            "client": "Клиент",
+            "master": "Мастер",
+            "service": "Услуга",
+            "start_time": "Дата и время",
+            "status": "Статус",
+            "notes": "Примечания",
+        }
         widgets = {
-            "start_time": admin.widgets.AdminSplitDateTime,
+            # Unfold-стилизованные виджеты — корректно подхватывают
+            # тёмную тему. Дефолтный admin.widgets.AdminSplitDateTime
+            # рендерил inputs с почти невидимым текстом на dark BG.
+            "start_time": UnfoldAdminSplitDateTimeWidget,
+            "notes": UnfoldAdminTextareaWidget(attrs={"rows": 3}),
         }
 
     def __init__(self, *args, **kwargs):
@@ -1457,6 +1473,10 @@ class BookingAdminCreateForm(forms.ModelForm):
             (Booking.Status.PENDING, "Ожидает подтверждения"),
         ]
         self.fields["notes"].required = False
+        # Подсказки под полями — компактнее, чем help_text на модели.
+        self.fields["start_time"].help_text = (
+            "Когда клиент придёт. Формат: ДД.ММ.ГГГГ / ЧЧ:ММ."
+        )
 
 
 @admin.register(Booking)
@@ -1558,6 +1578,16 @@ class BookingAdmin(TenantScopedAdminMixin, ModelAdmin):
         if request.user.is_superuser:
             return True
         return bool(self.get_admin_business_ids(request))
+
+    def get_autocomplete_fields(self, request):
+        """Autocomplete only on the add-form: existing object stays
+        view-only with everything in readonly_fields, so wiring
+        autocomplete there is moot (and triggers extra JS)."""
+        # The change_view passes obj via context, but get_autocomplete_fields
+        # has no obj — use the request path to detect /add/.
+        if request.path.rstrip("/").endswith("/add"):
+            return ("client", "master", "service")
+        return ()
 
     def get_fieldsets(self, request, obj=None):
         if obj is None:
