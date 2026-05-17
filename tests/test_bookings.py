@@ -10642,3 +10642,50 @@ def test_whatsapp_transport_rejects_partial_business_credentials(business):
             text="hi",
             metadata=None,
         )
+
+
+# ---------------------------------------------------------------------------
+# colored_active badge contract regression
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_colored_active_returns_tuple_for_badge_rendering(business, master, service):
+    """Unfold's @display(label=...) renders the *return value* inside a
+    coloured badge. Returning a raw bool shows "True"/"False" instead
+    of a Russian word — guard against accidentally reverting to the
+    raw-bool form across the six ModelAdmin classes using this pattern.
+    """
+    from apps.bookings.admin import (
+        BusinessAdmin,
+        CategoryAdmin,
+        ClientAdmin,
+        MasterAdmin,
+        ServiceAdmin,
+    )
+
+    category = Category.objects.create(business=business, name="cat")
+    client_obj = Client.objects.create(
+        business=business, name="C", phone="+77070000099"
+    )
+
+    cases = [
+        (BusinessAdmin(Business, AdminSite()), business, ("Активен", "Отключён")),
+        (CategoryAdmin(Category, AdminSite()), category, ("Активна", "Отключена")),
+        (MasterAdmin(Master, AdminSite()), master, ("Активен", "Отключён")),
+        (ServiceAdmin(Service, AdminSite()), service, ("Активна", "Отключена")),
+        (ClientAdmin(Client, AdminSite()), client_obj, ("Активен", "Отключён")),
+    ]
+
+    for admin_instance, obj, (active_word, inactive_word) in cases:
+        obj.is_active = True
+        result = admin_instance.colored_active(obj)
+        assert isinstance(result, tuple), (
+            f"{type(admin_instance).__name__}.colored_active must return a "
+            f"(color_key, display_text) tuple, got {type(result).__name__}"
+        )
+        assert result == (True, active_word)
+
+        obj.is_active = False
+        result = admin_instance.colored_active(obj)
+        assert result == (False, inactive_word)

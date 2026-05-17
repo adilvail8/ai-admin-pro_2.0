@@ -732,6 +732,20 @@ class TenantScopedAdminMixin:
     def has_delete_permission(self, request, obj=None):
         return self.has_view_permission(request, obj=obj)
 
+    def has_add_permission(self, request):
+        """Owner с действующей BusinessMembership может создавать записи.
+
+        Default Django `has_add_permission` требует add-perm на User —
+        у owner'а его обычно нет, поэтому без этого override на
+        MasterAdmin/ServiceAdmin/CategoryAdmin/ClientAdmin не появится
+        кнопка «Добавить». Admin'ы, которые хотят запретить add
+        (например OutboundMessageAdmin в owner-mode), переопределяют
+        этот метод явно.
+        """
+        if request.user.is_superuser:
+            return True
+        return bool(self.get_admin_business_ids(request))
+
     def get_object_business_id(self, obj):
         return getattr(obj, f"{self.business_filter_field}_id", None)
 
@@ -854,7 +868,11 @@ class BusinessAdmin(TenantScopedAdminMixin, ModelAdmin):
 
     @display(description="Активен", label={True: "success", False: "danger"})
     def colored_active(self, obj):
-        return obj.is_active
+        # Unfold's @display(label=...) renders the *return value* inside
+        # a coloured badge. Returning a raw bool shows the word "True" /
+        # "False" — return a (color_key, display_text) tuple so the
+        # badge says "Активен" / "Отключён".
+        return (True, "Активен") if obj.is_active else (False, "Отключён")
 
     def get_urls(self):
         return [
@@ -1086,7 +1104,7 @@ class CategoryAdmin(TenantScopedAdminMixin, ModelAdmin):
 
     @display(description="Активна", label={True: "success", False: "danger"})
     def colored_active(self, obj):
-        return obj.is_active
+        return (True, "Активна") if obj.is_active else (False, "Отключена")
 
 
 DEFAULT_NEW_MASTER_WORKING_HOURS = {
@@ -1191,7 +1209,11 @@ class MasterAdmin(TenantScopedAdminMixin, ModelAdmin):
 
     @display(description="Активен", label={True: "success", False: "danger"})
     def colored_active(self, obj):
-        return obj.is_active
+        # Unfold's @display(label=...) renders the *return value* inside
+        # a coloured badge. Returning a raw bool shows the word "True" /
+        # "False" — return a (color_key, display_text) tuple so the
+        # badge says "Активен" / "Отключён".
+        return (True, "Активен") if obj.is_active else (False, "Отключён")
 
     @display(description="Мастер", ordering="full_name")
     def full_name_display(self, obj):
@@ -1230,7 +1252,7 @@ class MasterUnavailabilityAdmin(TenantScopedAdminMixin, ModelAdmin):
 
     @display(description="Активно", label={True: "success", False: "danger"})
     def colored_active(self, obj):
-        return obj.is_active
+        return (True, "Активно") if obj.is_active else (False, "Отключено")
 
 
 def _format_price_kzt(price) -> str:
@@ -1312,7 +1334,7 @@ class ServiceAdmin(TenantScopedAdminMixin, ModelAdmin):
 
     @display(description="Активна", label={True: "success", False: "danger"})
     def colored_active(self, obj):
-        return obj.is_active
+        return (True, "Активна") if obj.is_active else (False, "Отключена")
 
     @display(description="Услуга", ordering="name")
     def name_display(self, obj):
@@ -1353,7 +1375,11 @@ class ClientAdmin(TenantScopedAdminMixin, ModelAdmin):
 
     @display(description="Активен", label={True: "success", False: "danger"})
     def colored_active(self, obj):
-        return obj.is_active
+        # Unfold's @display(label=...) renders the *return value* inside
+        # a coloured badge. Returning a raw bool shows the word "True" /
+        # "False" — return a (color_key, display_text) tuple so the
+        # badge says "Активен" / "Отключён".
+        return (True, "Активен") if obj.is_active else (False, "Отключён")
 
     @display(description="Клиент", ordering="name")
     def name_display(self, obj):
