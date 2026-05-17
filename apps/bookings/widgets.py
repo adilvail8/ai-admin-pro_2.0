@@ -55,6 +55,23 @@ class WorkingHoursWidget(forms.Widget):
     def render(self, name, value, attrs=None, renderer=None):
         if not isinstance(value, dict):
             value = {}
+        # Tailwind utility classes (Unfold подгружает) — тёмная тема ловится
+        # через `dark:` варианты. `accent-color` + `color-scheme: light dark`
+        # на input'ах гарантирует, что нативные checkbox/time контролы не
+        # сливаются с тёмным фоном Unfold (баг был: галочки невидимы).
+        day_cell = "py-1.5 pr-3.5 font-medium text-base-700 dark:text-base-200"
+        action_cell = "py-1.5 pr-3.5"
+        time_cell_start = "py-1.5 pr-2"
+        time_cell_end = "py-1.5"
+        time_input_class = (
+            "px-1.5 py-0.5 rounded border border-base-200 dark:border-base-700 "
+            "bg-white dark:bg-base-900 text-base-900 dark:text-base-100"
+        )
+        time_input_style = "accent-color: rgb(37 99 235); color-scheme: light dark;"
+        checkbox_style = (
+            "accent-color: rgb(37 99 235); color-scheme: light dark; "
+            "width: 16px; height: 16px;"
+        )
         rows = []
         for key in WEEKDAY_KEYS:
             label = WEEKDAY_LABELS[key]
@@ -67,49 +84,56 @@ class WorkingHoursWidget(forms.Widget):
             rows.append(
                 f"""
                 <tr>
-                  <td style="padding: 6px 14px 6px 0; font-weight: 500; color: #374151;">{label}</td>
-                  <td style="padding: 6px 14px 6px 0;">
+                  <td class="{day_cell}">{label}</td>
+                  <td class="{action_cell}">
                     <input type="checkbox"
                            name="{name}_{key}_active"
+                           style="{checkbox_style}"
                            {checked}
                            onchange="{_TOGGLE_JS}">
                   </td>
-                  <td style="padding: 6px 8px 6px 0;">
+                  <td class="{time_cell_start}">
                     <input type="time"
                            name="{name}_{key}_start"
                            data-role="start"
                            value="{start}"
                            step="900"
                            {disabled}
-                           style="padding: 4px 6px;">
+                           class="{time_input_class}"
+                           style="{time_input_style}">
                   </td>
-                  <td style="padding: 6px 0;">
+                  <td class="{time_cell_end}">
                     <input type="time"
                            name="{name}_{key}_end"
                            data-role="end"
                            value="{end}"
                            step="900"
                            {disabled}
-                           style="padding: 4px 6px;">
+                           class="{time_input_class}"
+                           style="{time_input_style}">
                   </td>
                 </tr>
                 """
             )
         rows_html = "".join(rows)
+        header_cell = (
+            "text-left py-1 pr-3.5 text-[11px] uppercase tracking-wider "
+            "text-base-500 dark:text-base-400 font-medium"
+        )
         return mark_safe(
             f"""
-            <table class="working-hours-widget" style="border-collapse: collapse; margin-top: 4px;">
+            <table class="working-hours-widget mt-1 border-collapse">
               <thead>
                 <tr>
-                  <th style="text-align: left; padding: 4px 14px 4px 0; font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em;">День</th>
-                  <th style="text-align: left; padding: 4px 14px 4px 0; font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em;">Работает</th>
-                  <th style="text-align: left; padding: 4px 8px 4px 0; font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em;">С</th>
-                  <th style="text-align: left; padding: 4px 0; font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em;">До</th>
+                  <th class="{header_cell}">День</th>
+                  <th class="{header_cell}">Работает</th>
+                  <th class="{header_cell}">С</th>
+                  <th class="{header_cell}">До</th>
                 </tr>
               </thead>
               <tbody>{rows_html}</tbody>
             </table>
-            <p style="margin: 6px 0 0 0; font-size: 11px; color: #9ca3af;">
+            <p class="mt-1.5 text-[11px] text-base-400 dark:text-base-500">
               Снимите галочку, чтобы пометить день как выходной.
             </p>
             """

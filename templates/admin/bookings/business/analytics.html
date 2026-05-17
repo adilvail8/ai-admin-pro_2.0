@@ -3,20 +3,7 @@
 {% block title %}{{ title }}{% endblock %}
 
 {% block content %}
-  {#
-    Аналитика салона. Стили — Tailwind utility classes с dark: вариантами,
-    которые Unfold подтягивает автоматически. Inline styles избегаем,
-    чтобы тёмная тема ловилась через единый toggle на <html>.
-
-    Палитра:
-      Карточка     bg-white dark:bg-base-900
-      Граница      border-base-200 dark:border-base-700
-      Заголовок    text-base-900 dark:text-base-100
-      Метка        text-base-500 dark:text-base-400
-      Цифра        text-base-900 dark:text-white
-      Линия акцент border-l-4 (цвет per-card)
-  #}
-
+  {# Styles: Tailwind utility classes with dark: variants — Unfold loads them. #}
   <div class="max-w-[1100px] mx-auto">
     <h1 class="text-2xl font-semibold text-base-900 dark:text-white m-0 mb-1.5">{{ title }}</h1>
     <p class="text-sm text-base-500 dark:text-base-400 m-0 mb-5">

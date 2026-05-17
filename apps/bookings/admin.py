@@ -1208,8 +1208,29 @@ class MasterForm(forms.ModelForm):
     class Meta:
         model = Master
         fields = "__all__"
+        labels = {
+            "business": "Салон",
+            "full_name": "Полное имя",
+            "specialization": "Специализация",
+            "working_hours": "Расписание",
+            "is_active": "Активен",
+        }
         widgets = {
             "working_hours": WorkingHoursWidget(),
+        }
+
+
+class MasterUnavailabilityForm(forms.ModelForm):
+    class Meta:
+        model = MasterUnavailability
+        fields = "__all__"
+        labels = {
+            "business": "Салон",
+            "master": "Мастер",
+            "start_time": "Начало",
+            "end_time": "Конец",
+            "reason": "Причина",
+            "is_active": "Активно",
         }
 
 
@@ -1255,6 +1276,7 @@ class MasterAdmin(TenantScopedAdminMixin, ModelAdmin):
 
 @admin.register(MasterUnavailability)
 class MasterUnavailabilityAdmin(TenantScopedAdminMixin, ModelAdmin):
+    form = MasterUnavailabilityForm
     business_related_fields = ("master",)
     date_hierarchy = "start_time"
     list_display = (
