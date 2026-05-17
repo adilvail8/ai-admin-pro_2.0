@@ -9098,6 +9098,216 @@ def test_booking_admin_mark_confirmed_action_updates_status_and_audit(
 
 
 @pytest.mark.django_db
+def test_booking_admin_owner_manual_create_uses_create_appointment_path(
+    business,
+    owner_user,
+    client_profile,
+    master,
+    service,
+):
+    BusinessMembership.objects.create(
+        user=owner_user,
+        business=business,
+        role=BusinessMembership.Role.OWNER,
+    )
+    start_time = timezone.now() + timedelta(days=1)
+    request = APIRequestFactory().post("/secure-admin/bookings/booking/add/")
+    request.user = owner_user
+
+    admin_instance = BookingAdmin(Booking, AdminSite())
+    obj = Booking(
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=start_time,
+        status=Booking.Status.CONFIRMED,
+        notes="Запись по телефону",
+    )
+    form = SimpleNamespace(
+        cleaned_data={
+            "client": client_profile,
+            "master": master,
+            "service": service,
+            "start_time": start_time,
+            "status": Booking.Status.CONFIRMED,
+            "notes": "Запись по телефону",
+        }
+    )
+
+    admin_instance.save_model(request, obj, form, change=False)
+
+    created = Booking.objects.get(pk=obj.pk)
+    assert created.business == business
+    assert created.status == Booking.Status.CONFIRMED
+    assert created.master == master
+    assert created.service == service
+    assert created.client == client_profile
+    assert created.notes == "Запись по телефону"
+    assert created.client_data.get("source") == "manual_admin"
+    assert created.client_data.get("created_by_user_id") == owner_user.id
+
+    assert AuditLog.objects.filter(
+        booking=created,
+        event_type="admin_booking_manual_create",
+        actor_type="human",
+    ).exists()
+    # Базовый аудит из services.create_appointment — для регресса pipeline'а.
+    assert AuditLog.objects.filter(
+        booking=created,
+        event_type="booking_created",
+    ).exists()
+
+
+@pytest.mark.django_db
+def test_booking_admin_manual_create_conflict_raises(
+    business,
+    owner_user,
+    client_profile,
+    master,
+    service,
+):
+    BusinessMembership.objects.create(
+        user=owner_user,
+        business=business,
+        role=BusinessMembership.Role.OWNER,
+    )
+    start_time = timezone.now() + timedelta(days=1)
+    Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=start_time,
+        client_data={"name": client_profile.name},
+        status=Booking.Status.CONFIRMED,
+    )
+
+    request = APIRequestFactory().post("/secure-admin/bookings/booking/add/")
+    request.user = owner_user
+    admin_instance = BookingAdmin(Booking, AdminSite())
+    obj = Booking(
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=start_time,
+        status=Booking.Status.CONFIRMED,
+    )
+    form = SimpleNamespace(
+        cleaned_data={
+            "client": client_profile,
+            "master": master,
+            "service": service,
+            "start_time": start_time,
+            "status": Booking.Status.CONFIRMED,
+            "notes": "",
+        }
+    )
+
+    with pytest.raises(ValidationError):
+        admin_instance.save_model(request, obj, form, change=False)
+
+    assert Booking.objects.count() == 1
+    assert not AuditLog.objects.filter(
+        event_type="admin_booking_manual_create"
+    ).exists()
+
+
+@pytest.mark.django_db
+def test_booking_admin_manual_create_rejects_cross_tenant_master(
+    business,
+    another_business,
+    owner_user,
+    client_profile,
+    service,
+):
+    BusinessMembership.objects.create(
+        user=owner_user,
+        business=business,
+        role=BusinessMembership.Role.OWNER,
+    )
+    foreign_master = Master.objects.create(
+        business=another_business,
+        full_name="Foreign Master",
+        specialization="Stylist",
+    )
+    start_time = timezone.now() + timedelta(days=1)
+
+    request = APIRequestFactory().post("/secure-admin/bookings/booking/add/")
+    request.user = owner_user
+    admin_instance = BookingAdmin(Booking, AdminSite())
+    obj = Booking(
+        client=client_profile,
+        master=foreign_master,
+        service=service,
+        start_time=start_time,
+        status=Booking.Status.CONFIRMED,
+    )
+    form = SimpleNamespace(
+        cleaned_data={
+            "client": client_profile,
+            "master": foreign_master,
+            "service": service,
+            "start_time": start_time,
+            "status": Booking.Status.CONFIRMED,
+            "notes": "",
+        }
+    )
+
+    with pytest.raises(ValidationError):
+        admin_instance.save_model(request, obj, form, change=False)
+
+    assert not Booking.objects.exists()
+
+
+@pytest.mark.django_db
+def test_booking_admin_change_view_remains_readonly(
+    business,
+    owner_user,
+    client_profile,
+    master,
+    service,
+):
+    BusinessMembership.objects.create(
+        user=owner_user,
+        business=business,
+        role=BusinessMembership.Role.OWNER,
+    )
+    booking = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(days=1),
+        client_data={"name": client_profile.name},
+        status=Booking.Status.CONFIRMED,
+    )
+    request = APIRequestFactory().get(
+        f"/secure-admin/bookings/booking/{booking.pk}/change/"
+    )
+    request.user = owner_user
+
+    admin_instance = BookingAdmin(Booking, AdminSite())
+    readonly = admin_instance.get_readonly_fields(request, obj=booking)
+    # На существующей записи всё ключевое должно оставаться readonly —
+    # ручная правка идёт только через actions (mark_confirmed и т.п.).
+    for field in (
+        "business",
+        "client",
+        "master",
+        "service",
+        "start_time",
+        "end_time",
+        "notes",
+    ):
+        assert field in readonly
+
+    # add-форма наоборот: readonly пустой, чтобы поля можно было ввести.
+    add_request = APIRequestFactory().get("/secure-admin/bookings/booking/add/")
+    add_request.user = owner_user
+    assert admin_instance.get_readonly_fields(add_request, obj=None) == ()
+
+
+@pytest.mark.django_db
 def test_outbound_message_admin_retry_only_dispatches_failed_messages(
     business,
     owner_user,

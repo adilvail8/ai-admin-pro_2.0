@@ -39,7 +39,7 @@ from .models import (
     Service,
     WEEKDAY_KEYS,
 )
-from .services import update_booking_status
+from .services import create_appointment, update_booking_status
 from .widgets import WorkingHoursWidget
 from .tasks import (
     dispatch_outbound_delivery,
@@ -1415,6 +1415,32 @@ class TenantMasterListFilter(admin.SimpleListFilter):
         return queryset
 
 
+class BookingAdminCreateForm(forms.ModelForm):
+    """Add-form для ручной записи через owner-панель.
+
+    Только нужные поля; статус по умолчанию — CONFIRMED (запись по телефону
+    уже подтверждена администратором). Запись пишется через
+    services.create_appointment, поэтому здесь не дублируем guard'ы.
+    """
+
+    class Meta:
+        model = Booking
+        fields = ("client", "master", "service", "start_time", "status", "notes")
+        widgets = {
+            "start_time": admin.widgets.AdminSplitDateTime,
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not self.initial.get("status"):
+            self.initial["status"] = Booking.Status.CONFIRMED
+        self.fields["status"].choices = [
+            (Booking.Status.CONFIRMED, "Подтверждена"),
+            (Booking.Status.PENDING, "Ожидает подтверждения"),
+        ]
+        self.fields["notes"].required = False
+
+
 @admin.register(Booking)
 class BookingAdmin(TenantScopedAdminMixin, ModelAdmin):
     business_related_fields = ("client", "master", "service")
@@ -1509,6 +1535,111 @@ class BookingAdmin(TenantScopedAdminMixin, ModelAdmin):
             },
         ),
     )
+
+    def has_add_permission(self, request):
+        if request.user.is_superuser:
+            return True
+        return bool(self.get_admin_business_ids(request))
+
+    def get_fieldsets(self, request, obj=None):
+        if obj is None:
+            return (
+                (
+                    "Новая запись",
+                    {
+                        "fields": (
+                            "client",
+                            "master",
+                            "service",
+                            "start_time",
+                            "status",
+                            "notes",
+                        )
+                    },
+                ),
+            )
+        return super().get_fieldsets(request, obj)
+
+    def get_readonly_fields(self, request, obj=None):
+        if obj is None:
+            return ()
+        return super().get_readonly_fields(request, obj)
+
+    def get_form(self, request, obj=None, **kwargs):
+        if obj is None:
+            kwargs["form"] = BookingAdminCreateForm
+        return super().get_form(request, obj, **kwargs)
+
+    def _resolve_creation_business(self, request, form):
+        """Owner — business из его membership; superadmin — единственного
+        ему доступного, либо None если он мульти-tenant (тогда ошибка)."""
+        business = form.cleaned_data.get("business")
+        if business is not None:
+            return business
+        primary = get_primary_business(request)
+        if primary is not None:
+            return primary
+        # Superadmin без membership: пытаемся вывести business из выбранных FK.
+        for field_name in ("client", "master", "service"):
+            related = form.cleaned_data.get(field_name)
+            if related is not None and getattr(related, "business_id", None):
+                return related.business
+        return None
+
+    def save_model(self, request, obj, form, change):
+        if change:
+            return super().save_model(request, obj, form, change)
+
+        business = self._resolve_creation_business(request, form)
+        if business is None:
+            raise ValidationError(
+                "Не удалось определить салон для новой записи."
+            )
+
+        client_data = {
+            "source": "manual_admin",
+            "created_by_user_id": request.user.id,
+            "created_by_username": request.user.get_username(),
+        }
+        booking = create_appointment(
+            business=business,
+            master=form.cleaned_data["master"],
+            service=form.cleaned_data["service"],
+            client=form.cleaned_data["client"],
+            start_time=form.cleaned_data["start_time"],
+            client_data=client_data,
+            status=form.cleaned_data.get("status") or Booking.Status.CONFIRMED,
+            notes=form.cleaned_data.get("notes", "") or "",
+        )
+        # Подменяем атрибуты unsaved-obj на свежесозданный booking, чтобы
+        # стандартный admin pipeline (LogEntry, response_add) отработал
+        # корректно без повторного obj.save().
+        obj.pk = booking.pk
+        obj.id = booking.pk
+        obj.business = business
+        obj.business_id = business.id
+        obj.end_time = booking.end_time
+        obj.service_duration = booking.service_duration
+        obj.service_buffer_time = booking.service_buffer_time
+        obj.client_data = booking.client_data
+        obj.created_at = booking.created_at
+        obj.updated_at = booking.updated_at
+        obj._state.adding = False
+
+        create_audit_log(
+            business=business,
+            client=booking.client,
+            booking=booking,
+            actor_type="human",
+            event_type="admin_booking_manual_create",
+            channel="admin",
+            payload={
+                "admin_user_id": request.user.id,
+                "admin_username": request.user.get_username(),
+                "start_time": booking.start_time.isoformat(),
+                "status": booking.status,
+            },
+        )
 
     @display(description="Статус", label=BOOKING_STATUS_LABELS)
     def colored_status(self, obj):
