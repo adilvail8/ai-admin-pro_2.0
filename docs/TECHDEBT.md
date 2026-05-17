@@ -7,23 +7,24 @@
 
 ## 🚨 До запуска WhatsApp (безопасность)
 
-### 1. `green_api_webhook` — частичная валидация `business_id` (минимум закрыт)
+### 1. ~~`green_api_webhook` — частичная валидация `business_id`~~ — **ЗАКРЫТО 2026-05-17**
 
-**Файл:** `apps/bookings/security.py:validate_green_api_business_id` + вызовы в `apps/bookings/views.py`.
+Полностью закрыто в этой сессии: per-business credentials через
+`Business.green_api_instance_id/api_token/api_url` (миграция 0020),
+inbound lookup по `instanceData.idInstance`, cross-check URL ↔ payload,
+outbound transport принимает business и берёт его creds. Подмена
+business_id в payload больше невозможна — он игнорируется.
 
-**Закрыто в этой сессии:** добавлен whitelist `GREEN_API_BUSINESS_IDS` (env var, default пусто = backward compatible). Применяется в трёх местах:
-- `extract_green_api_business_id` (legacy provider payload)
-- `process_webhook_request` (legacy internal payload, channel=WHATSAPP)
-- `whatsapp_webhook(business_id)` (per-business URL)
-
-Атакующий со знанием `GREEN_API_SHARED_SECRET` больше не может слать webhook с произвольным `business_id` — только с теми, что в whitelist. **На проде обязательно** настроить `GREEN_API_BUSINESS_IDS=2,3` (реальные id Aura/Sultan).
-
-**Остаточный долг:** в рамках whitelist всё ещё возможна подмена между Aura↔Sultan (атакующему нужно знать оба id). Полное закрытие требует per-business credentials:
-- Поле `Business.green_api_instance_id` + миграция
-- Lookup business по `instanceData.idInstance` из payload вместо доверия `payload["business_id"]`
-- Отдельные `apiTokenInstance` на бизнес
-
-Это архитектурное изменение, делается отдельной сессией когда добавится второй реальный Green API instance.
+**Остаточные мелкие долги:**
+- `api_token` хранится plaintext в БД. Шифрование (django-fernet-fields
+  или KMS) — делать после деплоя.
+- Глобальные `GREEN_API_INSTANCE_ID/API_TOKEN/URL` в env оставлены как
+  fallback с warning'ом. Hard-fail когда все живые salons мигрируют
+  на per-business creds.
+- `GREEN_API_BUSINESS_IDS` whitelist оставлен как back-stop. Удалить
+  отдельной задачей.
+- Health-check на смешанное состояние (часть Business с creds, часть
+  без) — отдельной задачей.
 
 ---
 

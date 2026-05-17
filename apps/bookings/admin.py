@@ -815,6 +815,24 @@ class BusinessAdmin(TenantScopedAdminMixin, ModelAdmin):
             },
         ),
         (
+            "WhatsApp (Green-API)",
+            {
+                "fields": (
+                    "green_api_instance_id",
+                    "green_api_api_token",
+                    "green_api_api_url",
+                ),
+                "description": (
+                    "Per-business Green-API credentials. instance_id "
+                    "используется для маршрутизации входящих webhook'ов "
+                    "и отправки исходящих сообщений с этого WhatsApp-аккаунта. "
+                    "Пусто во всех полях — fallback на глобальные GREEN_API_* "
+                    "(deprecated)."
+                ),
+                "classes": ("collapse",),
+            },
+        ),
+        (
             "Статус",
             {"fields": ("is_active",)},
         ),

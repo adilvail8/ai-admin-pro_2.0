@@ -42,6 +42,7 @@ def build_unsupported_media_message(*, language: str, media_type: str = "") -> s
     return variants.get(language, variants["ru"])
 
 
+from .green_api_routing import resolve_business_from_green_api_payload
 from .security import validate_green_api_business_id
 from .webhooks import (
     get_business,
@@ -139,10 +140,16 @@ def is_green_api_provider_payload(payload: dict) -> bool:
 
 
 def extract_green_api_business_id(*, payload: dict, request) -> int:
-    business_id = payload.get("business_id") or request.GET.get("business_id")
-    if not business_id:
-        raise ValidationError("Green-API webhook requires business_id.")
-    return validate_green_api_business_id(int(business_id))
+    """Резолвит business для Green-API webhook'а.
+
+    Источник истины — ``instanceData.idInstance`` в payload, который
+    маппится в ``Business.green_api_instance_id``. ``business_id`` из
+    payload/query больше не доверяем (это было source of security debt).
+    ``GREEN_API_BUSINESS_IDS`` whitelist остаётся как back-stop —
+    финальная проверка после lookup.
+    """
+    business = resolve_business_from_green_api_payload(payload)
+    return validate_green_api_business_id(business.id)
 
 
 def process_internal_event(*, event: dict, request):
@@ -405,6 +412,15 @@ def whatsapp_webhook(request, business_id: int):
 
     try:
         provider_payload = parse_request_payload(request)
+        # Cross-check: URL/path business_id ДОЛЖЕН совпадать с business,
+        # привязанным к idInstance из payload. Иначе атакующий может
+        # отправить событие чужого Green-API instance на URL своего
+        # business'а.
+        resolved_business = resolve_business_from_green_api_payload(provider_payload)
+        if resolved_business.id != business_id:
+            raise ValidationError(
+                "Green-API instance does not belong to the business in URL."
+            )
         event = normalize_incoming_event(
             ConversationMessage.Channel.WHATSAPP,
             provider_payload,

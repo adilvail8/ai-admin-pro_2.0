@@ -528,7 +528,10 @@ def send_outbound_message(self, outbound_message_id: int):
         outbound_message.save(update_fields=["attempts", "updated_at"])
 
         try:
-            transport = get_transport_for_channel(outbound_message.channel)
+            transport = get_transport_for_channel(
+                outbound_message.channel,
+                business=outbound_message.business,
+            )
             result = transport.send_text(
                 recipient=outbound_message.recipient,
                 text=outbound_message.text,

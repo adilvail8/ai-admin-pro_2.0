@@ -68,10 +68,47 @@ class Business(TimeStampedModel):
     )
     is_active = models.BooleanField(default=True)
 
+    green_api_instance_id = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text=_(
+            "Green-API instance id (idInstance). Используется для маршрутизации "
+            "входящих webhook'ов и отправки исходящих сообщений именно с этого "
+            "WhatsApp-аккаунта. Пусто = откатиться на глобальные GREEN_API_* "
+            "из env (deprecated)."
+        ),
+    )
+    green_api_api_token = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text=_(
+            "API-токен для Green-API instance. Plaintext в БД (тех-долг — "
+            "шифрование после деплоя)."
+        ),
+    )
+    green_api_api_url = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text=_(
+            "Опциональный override базового URL Green-API "
+            "(например, https://api.green-api.com). Пусто = settings.GREEN_API_URL."
+        ),
+    )
+
     class Meta:
         ordering = ("name",)
         verbose_name = _("business")
         verbose_name_plural = _("businesses")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("green_api_instance_id",),
+                condition=~models.Q(green_api_instance_id=""),
+                name="uniq_business_green_api_instance_id",
+            ),
+        ]
 
     def __str__(self):
         return self.name

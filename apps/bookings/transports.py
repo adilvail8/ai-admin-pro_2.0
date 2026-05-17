@@ -1,8 +1,11 @@
+import logging
 from dataclasses import dataclass
 from uuid import uuid4
 
 import httpx
 from django.conf import settings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -115,6 +118,10 @@ class HTTPTransportBase(OutboundTransport):
 class WhatsAppTransport(HTTPTransportBase):
     channel = "whatsapp"
 
+    def __init__(self, *, business=None, timeout_seconds: int | None = None):
+        super().__init__(timeout_seconds=timeout_seconds)
+        self.business = business
+
     @staticmethod
     def normalize_chat_id(recipient: str) -> str:
         normalized = recipient.strip()
@@ -123,18 +130,60 @@ class WhatsAppTransport(HTTPTransportBase):
         digits_only = normalized.replace("+", "")
         return f"{digits_only}@c.us"
 
-    def build_request(self, *, recipient: str, text: str, metadata: dict | None):
+    def _resolve_credentials(self) -> tuple[str, str, str]:
+        """Достать (url, instance_id, api_token) из Business; если все три
+        пусты — fallback на глобальные ``settings.GREEN_API_*`` c warning'ом.
+
+        Mixed-state (часть полей заполнена, часть нет) считается ошибкой:
+        иначе можно случайно слать токеном из БД на instance из env.
+        """
+        business = self.business
+        if business is not None:
+            instance_id = (business.green_api_instance_id or "").strip()
+            api_token = (business.green_api_api_token or "").strip()
+            api_url = (business.green_api_api_url or "").strip()
+            per_business_filled = [
+                bool(instance_id),
+                bool(api_token),
+            ]
+            if all(per_business_filled):
+                return (
+                    api_url or settings.GREEN_API_URL,
+                    instance_id,
+                    api_token,
+                )
+            if any(per_business_filled):
+                raise ValueError(
+                    "Business has partial Green-API credentials; both "
+                    "instance_id and api_token must be set together."
+                )
+            logger.warning(
+                "green_api_global_fallback",
+                extra={
+                    "business_id": getattr(business, "id", None),
+                    "reason": "per_business_creds_empty",
+                },
+            )
+
         if not settings.GREEN_API_URL:
             raise ValueError("GREEN_API_URL is not configured.")
         if not settings.GREEN_API_INSTANCE_ID or not settings.GREEN_API_API_TOKEN:
             raise ValueError(
                 "GREEN_API_INSTANCE_ID and GREEN_API_API_TOKEN must be configured."
             )
+        return (
+            settings.GREEN_API_URL,
+            settings.GREEN_API_INSTANCE_ID,
+            settings.GREEN_API_API_TOKEN,
+        )
+
+    def build_request(self, *, recipient: str, text: str, metadata: dict | None):
+        base_url, instance_id, api_token = self._resolve_credentials()
 
         url = (
-            f"{settings.GREEN_API_URL}/waInstance"
-            f"{settings.GREEN_API_INSTANCE_ID}/sendMessage/"
-            f"{settings.GREEN_API_API_TOKEN}"
+            f"{base_url}/waInstance"
+            f"{instance_id}/sendMessage/"
+            f"{api_token}"
         )
         return {
             "url": url,
@@ -278,10 +327,13 @@ class InternalAlertTransport(HTTPTransportBase):
         )
 
 
-def get_transport_for_channel(channel: str) -> OutboundTransport:
+def get_transport_for_channel(channel: str, *, business=None) -> OutboundTransport:
+    """Factory: для whatsapp прокидываем business чтобы транспорт мог
+    взять per-business Green-API credentials. Для telegram/internal
+    business игнорируется (credentials глобальные)."""
     transports: dict[str, OutboundTransport] = {
-        "whatsapp": WhatsAppTransport(),
+        "whatsapp": WhatsAppTransport(business=business),
         "telegram": TelegramTransport(),
         "internal": InternalAlertTransport(),
     }
-    return transports.get(channel, WhatsAppTransport())
+    return transports.get(channel, WhatsAppTransport(business=business))

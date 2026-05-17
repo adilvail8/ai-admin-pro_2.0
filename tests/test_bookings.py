@@ -107,6 +107,7 @@ from apps.bookings.tasks import (
     send_follow_up_if_pending,
     sync_booking_delivery_marker,
 )
+from apps.bookings.green_api_routing import resolve_business_from_green_api_payload
 from apps.bookings.transports import (
     InternalAlertTransport,
     SendResult,
@@ -165,6 +166,8 @@ def business():
             "tone": "Care & Professionalism",
             "rules": ["Всегда подтверждай детали записи."],
         },
+        green_api_instance_id="1101000001",
+        green_api_api_token="business-token-1",
     )
 
 
@@ -195,6 +198,8 @@ def another_business():
         working_hours="09:00-18:00",
         knowledge_base="Independent salon.",
         ai_settings={"temperature": 0.2},
+        green_api_instance_id="1101000002",
+        green_api_api_token="business-token-2",
     )
 
 
@@ -1360,7 +1365,7 @@ def test_follow_up_task_creates_and_sends_outbound_message(
 ):
     monkeypatch.setattr(
         "apps.bookings.tasks.get_transport_for_channel",
-        lambda channel: AcceptingTransport(),
+        lambda channel, **kwargs: AcceptingTransport(),
     )
     booking = Booking.objects.create(
         business=business,
@@ -1518,7 +1523,7 @@ def test_reminder_task_creates_and_sends_outbound_message(
 ):
     monkeypatch.setattr(
         "apps.bookings.tasks.get_transport_for_channel",
-        lambda channel: AcceptingTransport(),
+        lambda channel, **kwargs: AcceptingTransport(),
     )
     booking = Booking.objects.create(
         business=business,
@@ -1639,7 +1644,7 @@ def test_outbound_retry_cancels_expired_reminder_before_transport_call(
 
     monkeypatch.setattr(
         "apps.bookings.tasks.get_transport_for_channel",
-        lambda channel: ShouldNotBeCalledTransport(),
+        lambda channel, **kwargs: ShouldNotBeCalledTransport(),
     )
 
     booking = Booking.objects.create(
@@ -1687,7 +1692,7 @@ def test_outbound_message_is_not_marked_submitted_when_transport_fails(
 
     monkeypatch.setattr(
         "apps.bookings.tasks.get_transport_for_channel",
-        lambda channel: FailingTransport(),
+        lambda channel, **kwargs: FailingTransport(),
     )
 
     booking = Booking.objects.create(
@@ -1738,7 +1743,7 @@ def test_outbound_message_moves_to_dead_letter_after_retry_limit(
 
     monkeypatch.setattr(
         "apps.bookings.tasks.get_transport_for_channel",
-        lambda channel: FailingTransport(),
+        lambda channel, **kwargs: FailingTransport(),
     )
 
     booking = Booking.objects.create(
@@ -1772,7 +1777,7 @@ def test_notify_human_operator_reports_delivery_status(
 ):
     monkeypatch.setattr(
         "apps.bookings.tasks.get_transport_for_channel",
-        lambda channel: AcceptingTransport(),
+        lambda channel, **kwargs: AcceptingTransport(),
     )
     booking = Booking.objects.create(
         business=business,
@@ -7055,6 +7060,7 @@ def test_whatsapp_webhook_ignores_service_update(client, business, monkeypatch):
             {
                 "typeWebhook": "outgoingMessageStatus",
                 "status": "delivered",
+                "instanceData": {"idInstance": "1101000001"},
             }
         ),
         content_type="application/json",
@@ -7095,6 +7101,7 @@ def test_whatsapp_webhook_routes_voice_event_through_internal_event_dispatch(
             {
                 "typeWebhook": "incomingMessageReceived",
                 "idMessage": "wamid-voice-1",
+                "instanceData": {"idInstance": "1101000001"},
                 "senderData": {
                     "chatId": "77070000008@c.us",
                     "senderName": "Voice User",
@@ -7151,6 +7158,7 @@ def test_whatsapp_webhook_routes_image_event_through_internal_event_dispatch(
             {
                 "typeWebhook": "incomingMessageReceived",
                 "idMessage": "wamid-image-dispatch",
+                "instanceData": {"idInstance": "1101000001"},
                 "senderData": {
                     "chatId": "77070000009@c.us",
                     "senderName": "Image User",
@@ -7199,6 +7207,7 @@ def test_whatsapp_webhook_normalizes_green_api_payload(client, business, monkeyp
         data=json.dumps(
             {
                 "idMessage": "wamid-123",
+                "instanceData": {"idInstance": "1101000001"},
                 "senderData": {
                     "chatId": "77070000004@c.us",
                     "senderName": "Green User",
@@ -7262,6 +7271,7 @@ def test_whatsapp_webhook_returns_friendly_reply_for_media_callback(
         data=json.dumps(
             {
                 "idMessage": "wamid-image-1",
+                "instanceData": {"idInstance": "1101000001"},
                 "senderData": {
                     "chatId": "87070000012@c.us",
                     "senderName": "Media User",
@@ -7491,7 +7501,7 @@ def test_send_booking_reminder_day_sets_correct_field(
     hour-reminder field)."""
     monkeypatch.setattr(
         "apps.bookings.tasks.get_transport_for_channel",
-        lambda channel: AcceptingTransport(),
+        lambda channel, **kwargs: AcceptingTransport(),
     )
     booking = Booking.objects.create(
         business=business,
@@ -7555,7 +7565,7 @@ def test_process_outbound_health_alerts_sends_internal_alert(
     alert_transport = InternalAlertAcceptingTransport()
     monkeypatch.setattr(
         "apps.bookings.tasks.get_transport_for_channel",
-        lambda channel: alert_transport,
+        lambda channel, **kwargs: alert_transport,
     )
     monkeypatch.setattr(
         "apps.bookings.tasks.claim_outbound_alert_cooldown",
@@ -7633,7 +7643,7 @@ def test_process_outbound_health_alerts_respects_redis_cooldown(
     alert_transport = InternalAlertAcceptingTransport()
     monkeypatch.setattr(
         "apps.bookings.tasks.get_transport_for_channel",
-        lambda channel: alert_transport,
+        lambda channel, **kwargs: alert_transport,
     )
     monkeypatch.setattr(
         "apps.bookings.tasks.claim_outbound_alert_cooldown",
@@ -7679,7 +7689,7 @@ def test_process_outbound_health_alerts_uses_delivery_timestamps_not_created_at(
     alert_transport = InternalAlertAcceptingTransport()
     monkeypatch.setattr(
         "apps.bookings.tasks.get_transport_for_channel",
-        lambda channel: alert_transport,
+        lambda channel, **kwargs: alert_transport,
     )
     monkeypatch.setattr(
         "apps.bookings.tasks.claim_outbound_alert_cooldown",
@@ -9450,7 +9460,7 @@ def test_send_booking_reminder_uses_whatsapp_when_only_phone_exists(
     )
     monkeypatch.setattr(
         "apps.bookings.tasks.get_transport_for_channel",
-        lambda channel: AcceptingTransport(),
+        lambda channel, **kwargs: AcceptingTransport(),
     )
 
     result = send_booking_reminder.run(booking.id)
@@ -10296,6 +10306,7 @@ def test_green_api_webhook_normalizes_provider_payload(client, business, monkeyp
                 "business_id": business.id,
                 "typeWebhook": "incomingMessageReceived",
                 "idMessage": "wamid-green-provider",
+                "instanceData": {"idInstance": "1101000001"},
                 "senderData": {
                     "chatId": "77070000017@c.us",
                     "senderName": "Green Provider User",
@@ -10343,6 +10354,7 @@ def test_green_api_webhook_ignores_provider_service_update(client, business, mon
                 "business_id": business.id,
                 "typeWebhook": "outgoingMessageStatus",
                 "status": "delivered",
+                "instanceData": {"idInstance": "1101000001"},
             }
         ),
         content_type="application/json",
@@ -10353,3 +10365,265 @@ def test_green_api_webhook_ignores_provider_service_update(client, business, mon
     assert response.status_code == 200
     assert response.json()["status"] == "ignored"
     assert response.json()["event_type"] == "service"
+
+
+# ---------------------------------------------------------------------------
+# Green-API per-business credentials
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_green_api_routing_resolves_business_by_id_instance(business):
+    resolved = resolve_business_from_green_api_payload(
+        {"instanceData": {"idInstance": business.green_api_instance_id}}
+    )
+    assert resolved.pk == business.pk
+
+
+@pytest.mark.django_db
+def test_green_api_routing_raises_when_id_instance_missing(business):
+    with pytest.raises(ValidationError):
+        resolve_business_from_green_api_payload({"typeWebhook": "something"})
+
+
+@pytest.mark.django_db
+def test_green_api_routing_raises_when_id_instance_unknown(business):
+    with pytest.raises(ValidationError):
+        resolve_business_from_green_api_payload(
+            {"instanceData": {"idInstance": "9999999999"}}
+        )
+
+
+@pytest.mark.django_db
+def test_green_api_routing_ignores_inactive_business(business):
+    business.is_active = False
+    business.save(update_fields=["is_active", "updated_at"])
+    with pytest.raises(ValidationError):
+        resolve_business_from_green_api_payload(
+            {"instanceData": {"idInstance": business.green_api_instance_id}}
+        )
+
+
+@pytest.mark.django_db
+@override_settings(
+    GREEN_API_SHARED_SECRET="green-secret",
+    GREEN_API_ALLOWED_IPS=["127.0.0.1"],
+)
+def test_whatsapp_webhook_rejects_when_url_business_does_not_match_id_instance(
+    client,
+    business,
+    another_business,
+    monkeypatch,
+):
+    """Security regression: URL `/webhook/whatsapp/<business_id>/` must
+    match the business bound to ``instanceData.idInstance`` in payload."""
+
+    def must_not_run(*args, **kwargs):  # pragma: no cover
+        raise AssertionError("handler must not run for mismatched instance")
+
+    monkeypatch.setattr("apps.bookings.views.handle_text_message", must_not_run)
+
+    response = client.post(
+        # URL says business, payload's instance belongs to another_business
+        f"/api/v1/webhooks/whatsapp/{business.id}/",
+        data=json.dumps(
+            {
+                "idMessage": "wamid-mismatch",
+                "instanceData": {
+                    "idInstance": another_business.green_api_instance_id,
+                },
+                "senderData": {
+                    "chatId": "77070000044@c.us",
+                    "senderName": "Attacker",
+                },
+                "messageData": {
+                    "typeMessage": "textMessage",
+                    "textMessageData": {"textMessage": "Inject"},
+                },
+            }
+        ),
+        content_type="application/json",
+        HTTP_X_GREENAPI_SECRET="green-secret",
+        REMOTE_ADDR="127.0.0.1",
+    )
+
+    assert response.status_code == 400
+    assert "instance" in response.json()["detail"].lower()
+    assert not Client.objects.filter(
+        business=business,
+        phone="+77070000044",
+    ).exists()
+
+
+@pytest.mark.django_db
+@override_settings(
+    GREEN_API_SHARED_SECRET="green-secret",
+    GREEN_API_ALLOWED_IPS=["127.0.0.1"],
+)
+def test_green_api_legacy_webhook_resolves_business_from_id_instance_not_payload(
+    client,
+    business,
+    another_business,
+    monkeypatch,
+):
+    """Security regression: legacy /webhook/green-api/ must IGNORE
+    ``payload["business_id"]`` and route by ``instanceData.idInstance``."""
+
+    captured = {}
+
+    def fake_handle_text_message(**kwargs):
+        captured["business_id"] = kwargs.get("business_id")
+        return {"reply": "ok", "escalated": False}
+
+    monkeypatch.setattr(
+        "apps.bookings.views.handle_text_message",
+        fake_handle_text_message,
+    )
+
+    response = client.post(
+        "/api/v1/webhooks/green-api/",
+        data=json.dumps(
+            {
+                # Attacker spoofs another_business.id in payload …
+                "business_id": another_business.id,
+                "typeWebhook": "incomingMessageReceived",
+                "idMessage": "wamid-spoof",
+                # … but the real Green-API instance is `business`.
+                "instanceData": {"idInstance": business.green_api_instance_id},
+                "senderData": {
+                    "chatId": "77070000055@c.us",
+                    "senderName": "Spoof Sender",
+                },
+                "messageData": {
+                    "typeMessage": "textMessage",
+                    "textMessageData": {"textMessage": "Hello"},
+                },
+            }
+        ),
+        content_type="application/json",
+        HTTP_X_GREENAPI_SECRET="green-secret",
+        REMOTE_ADDR="127.0.0.1",
+    )
+
+    assert response.status_code == 200
+    assert captured["business_id"] == business.id
+    assert Client.objects.filter(
+        business=business,
+        phone="+77070000055",
+    ).exists()
+    assert not Client.objects.filter(
+        business=another_business,
+        phone="+77070000055",
+    ).exists()
+
+
+@pytest.mark.django_db
+@override_settings(
+    GREEN_API_URL="https://global.green-api.example",
+    GREEN_API_INSTANCE_ID="global-instance",
+    GREEN_API_API_TOKEN="global-token",
+)
+def test_whatsapp_transport_uses_business_credentials_when_set(business):
+    business.green_api_instance_id = "biz-instance-77"
+    business.green_api_api_token = "biz-token-77"
+    business.green_api_api_url = "https://biz.green-api.example"
+    business.save(
+        update_fields=[
+            "green_api_instance_id",
+            "green_api_api_token",
+            "green_api_api_url",
+            "updated_at",
+        ]
+    )
+
+    transport = WhatsAppTransport(business=business)
+    request = transport.build_request(
+        recipient="+77070000060",
+        text="hi",
+        metadata=None,
+    )
+
+    assert request["url"] == (
+        "https://biz.green-api.example/waInstance"
+        "biz-instance-77/sendMessage/biz-token-77"
+    )
+
+
+@pytest.mark.django_db
+@override_settings(
+    GREEN_API_URL="https://global.green-api.example",
+    GREEN_API_INSTANCE_ID="global-instance",
+    GREEN_API_API_TOKEN="global-token",
+)
+def test_whatsapp_transport_falls_back_to_global_when_business_creds_empty(business):
+    # Wipe per-business creds — fixture sets them by default.
+    business.green_api_instance_id = ""
+    business.green_api_api_token = ""
+    business.green_api_api_url = ""
+    business.save(
+        update_fields=[
+            "green_api_instance_id",
+            "green_api_api_token",
+            "green_api_api_url",
+            "updated_at",
+        ]
+    )
+
+    transport = WhatsAppTransport(business=business)
+    request = transport.build_request(
+        recipient="+77070000061",
+        text="hi",
+        metadata=None,
+    )
+
+    assert request["url"] == (
+        "https://global.green-api.example/waInstance"
+        "global-instance/sendMessage/global-token"
+    )
+
+
+@pytest.mark.django_db
+@override_settings(
+    GREEN_API_URL="",
+    GREEN_API_INSTANCE_ID="",
+    GREEN_API_API_TOKEN="",
+)
+def test_whatsapp_transport_raises_when_no_credentials_anywhere(business):
+    business.green_api_instance_id = ""
+    business.green_api_api_token = ""
+    business.green_api_api_url = ""
+    business.save(
+        update_fields=[
+            "green_api_instance_id",
+            "green_api_api_token",
+            "green_api_api_url",
+            "updated_at",
+        ]
+    )
+    transport = WhatsAppTransport(business=business)
+    with pytest.raises(ValueError):
+        transport.build_request(
+            recipient="+77070000062",
+            text="hi",
+            metadata=None,
+        )
+
+
+@pytest.mark.django_db
+def test_whatsapp_transport_rejects_partial_business_credentials(business):
+    business.green_api_instance_id = "biz-instance-only"
+    business.green_api_api_token = ""
+    business.save(
+        update_fields=[
+            "green_api_instance_id",
+            "green_api_api_token",
+            "updated_at",
+        ]
+    )
+    transport = WhatsAppTransport(business=business)
+    with pytest.raises(ValueError):
+        transport.build_request(
+            recipient="+77070000063",
+            text="hi",
+            metadata=None,
+        )
