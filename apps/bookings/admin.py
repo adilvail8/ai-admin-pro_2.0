@@ -824,7 +824,7 @@ class BusinessForm(forms.ModelForm):
             "address": "Адрес",
             "city": "Город",
             "slug": "Слаг (часть URL)",
-            "working_hours": "Часы работы",
+            "working_hours": "График работы салона",
             "timezone_name": "Часовой пояс",
             "ai_settings": "Настройки ИИ",
             "ai_rules": "Правила ИИ",
@@ -836,6 +836,28 @@ class BusinessForm(forms.ModelForm):
             "green_api_api_url": "Green-API URL (опционально)",
             "telegram_bot_token": "Telegram bot token",
             "telegram_webhook_secret": "Telegram webhook secret",
+        }
+        help_texts = {
+            "working_hours": (
+                "Свободный текст — бот покажет его клиенту, когда тот спросит "
+                "«когда вы работаете?». Пример: «Пн-Пт 10:00-20:00, Сб "
+                "11:00-18:00, Вс выходной». Это график салона, не расписание "
+                "мастеров — мастера настраиваются отдельно у каждого мастера."
+            ),
+        }
+        widgets = {
+            "working_hours": forms.Textarea(
+                attrs={
+                    "rows": 2,
+                    "placeholder": "Пн-Пт 10:00-20:00, Сб 11:00-18:00, Вс выходной",
+                    "class": (
+                        "px-2 py-1 rounded border border-base-200 "
+                        "dark:border-base-700 bg-white dark:bg-base-900 "
+                        "text-base-900 dark:text-base-100"
+                    ),
+                    "style": "color-scheme: light dark;",
+                }
+            ),
         }
 
 
