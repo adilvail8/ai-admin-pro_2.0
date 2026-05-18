@@ -154,7 +154,7 @@
               </thead>
               <tbody>
                 {% for row in top_services %}
-                  <tr class="border-t border-base-100 dark:border-base-700/50 hover:bg-base-50 dark:hover:bg-base-900/40">
+                  <tr class="border-t border-base-100 dark:border-base-700/50 hover:bg-base-100 dark:hover:bg-white/[.04]">
                     <td class="px-5 py-3 text-base-900 dark:text-base-100 font-medium">{{ row.service__name }}</td>
                     <td class="px-3 py-3 text-right text-base-700 dark:text-base-300">{{ row.count }}</td>
                     <td class="px-5 py-3 text-right font-semibold text-base-900 dark:text-white">{{ row.revenue }}</td>
@@ -193,7 +193,7 @@
               </thead>
               <tbody>
                 {% for row in master_workload %}
-                  <tr class="border-t border-base-100 dark:border-base-700/50 hover:bg-base-50 dark:hover:bg-base-900/40">
+                  <tr class="border-t border-base-100 dark:border-base-700/50 hover:bg-base-100 dark:hover:bg-white/[.04]">
                     <td class="px-5 py-3 text-base-900 dark:text-base-100 font-medium">{{ row.master__full_name|default:"—" }}</td>
                     <td class="px-3 py-3 text-right text-base-700 dark:text-base-300">{{ row.count }}</td>
                     <td class="px-5 py-3 text-right font-semibold text-emerald-600 dark:text-emerald-400">{{ row.confirmed }}</td>
@@ -232,7 +232,7 @@
             </thead>
             <tbody>
               {% for row in channel_breakdown %}
-                <tr class="border-t border-base-100 dark:border-base-700/50 hover:bg-base-50 dark:hover:bg-base-900/40">
+                <tr class="border-t border-base-100 dark:border-base-700/50 hover:bg-base-100 dark:hover:bg-white/[.04]">
                   <td class="px-5 py-3 text-base-900 dark:text-base-100 font-medium">{{ row.channel_label }}</td>
                   <td class="px-5 py-3 text-right font-semibold text-base-900 dark:text-white">{{ row.count }}</td>
                 </tr>
