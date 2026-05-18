@@ -4,178 +4,202 @@
 
 {% block content %}
   {# Styles: Tailwind utility classes with dark: variants — Unfold loads them. #}
-  <div class="max-w-[1100px] mx-auto">
-    <h1 class="text-2xl font-semibold text-base-900 dark:text-white m-0 mb-1.5">{{ title }}</h1>
-    <p class="text-sm text-base-500 dark:text-base-400 m-0 mb-5">
-      Записи, конверсия, загрузка мастеров и выручка за выбранный период.
-    </p>
+  <div class="max-w-[1200px] mx-auto px-1">
 
-    {# Period selector tabs #}
-    <div class="flex gap-2 mb-6 border-b border-base-200 dark:border-base-700 pb-3">
+    {# ── Header ─────────────────────────────────────────────────────── #}
+    <header class="mb-7">
+      <h1 class="text-[26px] font-semibold text-base-900 dark:text-white tracking-tight m-0">
+        {{ title }}
+      </h1>
+      <p class="text-[13px] text-base-500 dark:text-base-400 m-0 mt-1">
+        Записи, конверсия, загрузка мастеров и выручка за выбранный период.
+      </p>
+
+      {# Scope banner — встроен в header, без отдельного блока #}
+      {% if businesses|length == 1 %}
+        <div class="text-[12px] text-base-500 dark:text-base-400 mt-2">
+          Салон: <strong class="text-base-700 dark:text-base-200 font-medium">{{ businesses.0.name }}</strong>
+        </div>
+      {% elif businesses|length > 1 %}
+        <div class="text-[12px] text-base-500 dark:text-base-400 mt-2 flex flex-wrap items-center gap-1.5">
+          <span>Видимые бизнесы:</span>
+          {% for b in businesses %}
+            <span class="inline-block px-1.5 py-0.5 bg-base-100 dark:bg-base-800 rounded text-base-700 dark:text-base-300 text-[11px] font-medium">{{ b.name }}</span>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="text-[13px] text-rose-600 dark:text-rose-400 mt-2">
+          Нет доступных бизнесов для отображения.
+        </div>
+      {% endif %}
+    </header>
+
+    {# ── Period selector — segmented control ───────────────────────── #}
+    <div class="inline-flex items-center p-1 bg-base-100 dark:bg-base-800/60 rounded-lg mb-6">
       {% for value, label in period_options %}
         {% if value == selected_period %}
           <a href="?period={{ value }}"
-             class="px-3.5 py-1.5 rounded-md bg-primary-600 text-white font-medium text-[13px] no-underline hover:bg-primary-700">
+             class="px-3.5 py-1.5 rounded-md bg-white dark:bg-base-700 text-base-900 dark:text-white text-[13px] font-medium no-underline shadow-sm">
             {{ label }}
           </a>
         {% else %}
           <a href="?period={{ value }}"
-             class="px-3.5 py-1.5 rounded-md bg-base-100 dark:bg-base-800 text-base-700 dark:text-base-300 text-[13px] no-underline hover:bg-base-200 dark:hover:bg-base-700">
+             class="px-3.5 py-1.5 rounded-md text-base-600 dark:text-base-300 text-[13px] no-underline hover:text-base-900 dark:hover:text-white">
             {{ label }}
           </a>
         {% endif %}
       {% endfor %}
     </div>
 
-    {# Scope banner #}
-    {% if businesses|length > 1 %}
-      <div class="text-xs text-base-500 dark:text-base-400 mb-4">
-        Видимые бизнесы:
-        {% for b in businesses %}
-          <span class="inline-block px-2 py-0.5 bg-base-100 dark:bg-base-800 rounded mr-1 text-base-700 dark:text-base-300">{{ b.name }}</span>
-        {% endfor %}
-      </div>
-    {% elif businesses|length == 1 %}
-      <div class="text-xs text-base-500 dark:text-base-400 mb-4">
-        Салон: <strong class="text-base-800 dark:text-base-200">{{ businesses.0.name }}</strong>
-      </div>
-    {% else %}
-      <div class="text-sm text-red-600 dark:text-red-400 mb-4">
-        Нет доступных бизнесов для отображения.
-      </div>
-    {% endif %}
-
-    {# KPI cards #}
-    <div class="grid gap-4 mb-6" style="grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));">
+    {# ── KPI row — primary metrics ──────────────────────────────────── #}
+    <div class="grid gap-3 mb-3" style="grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));">
       {% for card in kpi_cards %}
-        <div class="bg-white dark:bg-base-900 border border-base-200 dark:border-base-700 rounded-lg p-[18px]
-                    {% if card.tone == 'green' %}border-l-4 border-l-green-500
-                    {% elif card.tone == 'red' %}border-l-4 border-l-red-500
-                    {% elif card.tone == 'amber' %}border-l-4 border-l-amber-500
-                    {% else %}border-l-4 border-l-base-500{% endif %}">
-          <div class="text-[11px] text-base-500 dark:text-base-400 uppercase tracking-wider mb-2">
+        <div class="rounded-xl border border-base-200 dark:border-base-700/60 p-5
+                    {% if card.tone == 'green' %}bg-emerald-50/70 dark:bg-emerald-950/20
+                    {% elif card.tone == 'red' %}bg-rose-50/70 dark:bg-rose-950/20
+                    {% elif card.tone == 'amber' %}bg-amber-50/70 dark:bg-amber-950/20
+                    {% else %}bg-white dark:bg-base-900{% endif %}">
+          <div class="text-[11px] font-medium text-base-500 dark:text-base-400 uppercase tracking-wider">
             {{ card.label }}
           </div>
-          <div class="text-[28px] font-semibold text-base-900 dark:text-white leading-tight">
-            {{ card.value }}
+          <div class="mt-2 text-[32px] font-semibold leading-none tracking-tight
+                      {% if card.tone == 'green' %}text-emerald-700 dark:text-emerald-300
+                      {% elif card.tone == 'red' %}text-rose-700 dark:text-rose-300
+                      {% elif card.tone == 'amber' %}text-amber-700 dark:text-amber-300
+                      {% else %}text-base-900 dark:text-white{% endif %}"
+               style="font-variant-numeric: tabular-nums;">
+            {{ card.value|default:"—" }}
           </div>
-          <div class="text-xs text-base-500 dark:text-base-500 mt-1">
+          <div class="mt-1.5 text-[12px] text-base-500 dark:text-base-400">
             {{ card.subtitle }}
           </div>
         </div>
       {% endfor %}
     </div>
 
-    {# Conversion + repeat clients — two callouts side-by-side #}
-    <div class="grid gap-4 mb-6" style="grid-template-columns: 2fr 1fr;">
-      <div class="bg-white dark:bg-base-900 border border-base-200 dark:border-base-700 border-l-4 border-l-primary-600 rounded-lg p-[18px]">
-        <div class="text-[11px] text-base-500 dark:text-base-400 uppercase tracking-wider mb-2">
-          Конверсия: диалог → запись
+    {# ── Secondary metrics — conversion + repeat clients ─────────────── #}
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+      <div class="rounded-xl border border-base-200 dark:border-base-700/60 bg-white dark:bg-base-900 p-5">
+        <div class="flex items-baseline justify-between gap-3">
+          <div class="text-[11px] font-medium text-base-500 dark:text-base-400 uppercase tracking-wider">
+            Конверсия: диалог → запись
+          </div>
         </div>
-        <div class="text-[28px] font-semibold text-base-900 dark:text-white leading-tight">
+        <div class="mt-2 text-[32px] font-semibold leading-none tracking-tight text-base-900 dark:text-white"
+             style="font-variant-numeric: tabular-nums;">
           {{ conversion.rate }}%
         </div>
-        <div class="text-[13px] text-base-500 dark:text-base-400 mt-1.5">
+        <div class="mt-1.5 text-[12px] text-base-500 dark:text-base-400">
           {{ conversion.booked }} из {{ conversion.messaged }} клиентов записались
         </div>
       </div>
 
-      <div class="bg-white dark:bg-base-900 border border-base-200 dark:border-base-700 border-l-4 border-l-violet-500 rounded-lg p-[18px]">
-        <div class="text-[11px] text-base-500 dark:text-base-400 uppercase tracking-wider mb-2">
-          Повторные клиенты
+      <div class="rounded-xl border border-base-200 dark:border-base-700/60 bg-white dark:bg-base-900 p-5">
+        <div class="flex items-baseline justify-between gap-3">
+          <div class="text-[11px] font-medium text-base-500 dark:text-base-400 uppercase tracking-wider">
+            Повторные клиенты
+          </div>
         </div>
-        <div class="text-[28px] font-semibold text-base-900 dark:text-white leading-tight">
+        <div class="mt-2 text-[32px] font-semibold leading-none tracking-tight text-base-900 dark:text-white"
+             style="font-variant-numeric: tabular-nums;">
           {{ repeat_clients.period }}
         </div>
-        <div class="text-[13px] text-base-500 dark:text-base-400 mt-1.5">
-          в&nbsp;периоде &middot; всего: <strong class="text-base-800 dark:text-base-200">{{ repeat_clients.lifetime }}</strong>
+        <div class="mt-1.5 text-[12px] text-base-500 dark:text-base-400">
+          в&nbsp;периоде &middot; всего за всё время: <strong class="text-base-700 dark:text-base-200 font-medium">{{ repeat_clients.lifetime }}</strong>
         </div>
       </div>
     </div>
 
-    {# Breakdowns: top services / master workload #}
-    <div class="grid grid-cols-2 gap-4 mb-4">
-      <div class="bg-white dark:bg-base-900 border border-base-200 dark:border-base-700 rounded-lg p-4">
-        <div class="text-[11px] text-base-500 dark:text-base-400 uppercase tracking-wider mb-2.5">
+    {# ── Breakdowns — top services / master workload ─────────────────── #}
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+
+      <div class="rounded-xl border border-base-200 dark:border-base-700/60 bg-white dark:bg-base-900">
+        <div class="px-5 pt-4 pb-2 text-[11px] font-medium text-base-500 dark:text-base-400 uppercase tracking-wider">
           Топ услуг
         </div>
         {% if top_services %}
-          <table class="w-full border-collapse text-[13px]">
+          <table class="w-full text-[13px]" style="font-variant-numeric: tabular-nums;">
             <thead>
-              <tr class="border-b border-base-200 dark:border-base-700 text-left">
-                <th class="py-1.5 px-1 font-medium text-base-500 dark:text-base-400">Услуга</th>
-                <th class="py-1.5 px-1 font-medium text-base-500 dark:text-base-400 text-right">Записей</th>
-                <th class="py-1.5 px-1 font-medium text-base-500 dark:text-base-400 text-right">Выручка ₸</th>
+              <tr class="text-left">
+                <th class="px-5 py-2 font-medium text-base-500 dark:text-base-400 border-b border-base-200 dark:border-base-700/60">Услуга</th>
+                <th class="px-3 py-2 font-medium text-base-500 dark:text-base-400 text-right border-b border-base-200 dark:border-base-700/60">Записей</th>
+                <th class="px-5 py-2 font-medium text-base-500 dark:text-base-400 text-right border-b border-base-200 dark:border-base-700/60">Выручка ₸</th>
               </tr>
             </thead>
             <tbody>
               {% for row in top_services %}
-                <tr class="border-b border-base-100 dark:border-base-800">
-                  <td class="py-1.5 px-1 text-base-900 dark:text-base-100">{{ row.service__name }}</td>
-                  <td class="py-1.5 px-1 text-right text-base-700 dark:text-base-300">{{ row.count }}</td>
-                  <td class="py-1.5 px-1 text-right font-medium text-base-900 dark:text-white">{{ row.revenue }}</td>
+                <tr class="hover:bg-base-50 dark:hover:bg-base-800/40">
+                  <td class="px-5 py-2.5 text-base-900 dark:text-base-100 border-b border-base-100 dark:border-base-800/60">{{ row.service__name }}</td>
+                  <td class="px-3 py-2.5 text-right text-base-700 dark:text-base-300 border-b border-base-100 dark:border-base-800/60">{{ row.count }}</td>
+                  <td class="px-5 py-2.5 text-right font-medium text-base-900 dark:text-white border-b border-base-100 dark:border-base-800/60">{{ row.revenue }}</td>
                 </tr>
               {% endfor %}
             </tbody>
           </table>
         {% else %}
-          <div class="text-base-400 dark:text-base-500 text-[13px]">Нет данных за период.</div>
+          <div class="px-5 py-6 text-center text-[13px] text-base-400 dark:text-base-500">
+            Нет данных за период.
+          </div>
         {% endif %}
       </div>
 
-      <div class="bg-white dark:bg-base-900 border border-base-200 dark:border-base-700 rounded-lg p-4">
-        <div class="text-[11px] text-base-500 dark:text-base-400 uppercase tracking-wider mb-2.5">
+      <div class="rounded-xl border border-base-200 dark:border-base-700/60 bg-white dark:bg-base-900">
+        <div class="px-5 pt-4 pb-2 text-[11px] font-medium text-base-500 dark:text-base-400 uppercase tracking-wider">
           Загрузка мастеров
         </div>
         {% if master_workload %}
-          <table class="w-full border-collapse text-[13px]">
+          <table class="w-full text-[13px]" style="font-variant-numeric: tabular-nums;">
             <thead>
-              <tr class="border-b border-base-200 dark:border-base-700 text-left">
-                <th class="py-1.5 px-1 font-medium text-base-500 dark:text-base-400">Мастер</th>
-                <th class="py-1.5 px-1 font-medium text-base-500 dark:text-base-400 text-right">Всего</th>
-                <th class="py-1.5 px-1 font-medium text-base-500 dark:text-base-400 text-right">Подтв.</th>
+              <tr class="text-left">
+                <th class="px-5 py-2 font-medium text-base-500 dark:text-base-400 border-b border-base-200 dark:border-base-700/60">Мастер</th>
+                <th class="px-3 py-2 font-medium text-base-500 dark:text-base-400 text-right border-b border-base-200 dark:border-base-700/60">Всего</th>
+                <th class="px-5 py-2 font-medium text-base-500 dark:text-base-400 text-right border-b border-base-200 dark:border-base-700/60">Подтв.</th>
               </tr>
             </thead>
             <tbody>
               {% for row in master_workload %}
-                <tr class="border-b border-base-100 dark:border-base-800">
-                  <td class="py-1.5 px-1 text-base-900 dark:text-base-100">{{ row.master__full_name|default:"—" }}</td>
-                  <td class="py-1.5 px-1 text-right text-base-700 dark:text-base-300">{{ row.count }}</td>
-                  <td class="py-1.5 px-1 text-right text-green-600 dark:text-green-400 font-medium">{{ row.confirmed }}</td>
+                <tr class="hover:bg-base-50 dark:hover:bg-base-800/40">
+                  <td class="px-5 py-2.5 text-base-900 dark:text-base-100 border-b border-base-100 dark:border-base-800/60">{{ row.master__full_name|default:"—" }}</td>
+                  <td class="px-3 py-2.5 text-right text-base-700 dark:text-base-300 border-b border-base-100 dark:border-base-800/60">{{ row.count }}</td>
+                  <td class="px-5 py-2.5 text-right font-medium text-emerald-700 dark:text-emerald-400 border-b border-base-100 dark:border-base-800/60">{{ row.confirmed }}</td>
                 </tr>
               {% endfor %}
             </tbody>
           </table>
         {% else %}
-          <div class="text-base-400 dark:text-base-500 text-[13px]">Нет данных за период.</div>
+          <div class="px-5 py-6 text-center text-[13px] text-base-400 dark:text-base-500">
+            Нет данных за период.
+          </div>
         {% endif %}
       </div>
     </div>
 
-    {# Channel breakdown — full width #}
-    <div class="bg-white dark:bg-base-900 border border-base-200 dark:border-base-700 rounded-lg p-4 mb-6">
-      <div class="text-[11px] text-base-500 dark:text-base-400 uppercase tracking-wider mb-2.5">
-        Каналы (входящие сообщения клиентов)
+    {# ── Channels — full width, slimmer ──────────────────────────────── #}
+    <div class="rounded-xl border border-base-200 dark:border-base-700/60 bg-white dark:bg-base-900 mb-6">
+      <div class="px-5 pt-4 pb-2 text-[11px] font-medium text-base-500 dark:text-base-400 uppercase tracking-wider">
+        Каналы &middot; входящие сообщения клиентов
       </div>
       {% if channel_breakdown %}
-        <table class="w-full border-collapse text-[13px]">
+        <table class="w-full text-[13px]" style="font-variant-numeric: tabular-nums;">
           <thead>
-            <tr class="border-b border-base-200 dark:border-base-700 text-left">
-              <th class="py-1.5 px-1 font-medium text-base-500 dark:text-base-400">Канал</th>
-              <th class="py-1.5 px-1 font-medium text-base-500 dark:text-base-400 text-right">Сообщений</th>
+            <tr class="text-left">
+              <th class="px-5 py-2 font-medium text-base-500 dark:text-base-400 border-b border-base-200 dark:border-base-700/60">Канал</th>
+              <th class="px-5 py-2 font-medium text-base-500 dark:text-base-400 text-right border-b border-base-200 dark:border-base-700/60">Сообщений</th>
             </tr>
           </thead>
           <tbody>
             {% for row in channel_breakdown %}
-              <tr class="border-b border-base-100 dark:border-base-800">
-                <td class="py-1.5 px-1 text-base-900 dark:text-base-100">{{ row.channel_label }}</td>
-                <td class="py-1.5 px-1 text-right font-medium text-base-900 dark:text-white">{{ row.count }}</td>
+              <tr class="hover:bg-base-50 dark:hover:bg-base-800/40">
+                <td class="px-5 py-2.5 text-base-900 dark:text-base-100 border-b border-base-100 dark:border-base-800/60">{{ row.channel_label }}</td>
+                <td class="px-5 py-2.5 text-right font-medium text-base-900 dark:text-white border-b border-base-100 dark:border-base-800/60">{{ row.count }}</td>
               </tr>
             {% endfor %}
           </tbody>
         </table>
       {% else %}
-        <div class="text-base-400 dark:text-base-500 text-[13px]">Нет входящих сообщений за период.</div>
+        <div class="px-5 py-6 text-center text-[13px] text-base-400 dark:text-base-500">
+          Нет входящих сообщений за период.
+        </div>
       {% endif %}
     </div>
   </div>
