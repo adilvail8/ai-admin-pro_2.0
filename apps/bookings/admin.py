@@ -67,6 +67,18 @@ BOOKING_STATUS_LABELS = {
     Booking.Status.NEEDS_ATTENTION: "warning",
 }
 
+# Display text for the colored_status badge — Unfold's @display(label=...)
+# renders the *return value* inside the coloured pill, so bare `obj.status`
+# would show the raw db value ("needs_attention"). Returning a
+# (color_key, display_text) tuple gives a proper Russian label.
+BOOKING_STATUS_RU = {
+    Booking.Status.CONFIRMED: "Подтверждена",
+    Booking.Status.PENDING: "Ожидает",
+    Booking.Status.CANCELLED: "Отменена",
+    Booking.Status.NO_SHOW: "Неявка",
+    Booking.Status.NEEDS_ATTENTION: "Нужна проверка",
+}
+
 OUTBOUND_STATUS_LABELS = {
     OutboundMessage.Status.QUEUED: "info",
     OutboundMessage.Status.SUBMITTED: "info",
@@ -802,8 +814,34 @@ class TenantScopedAdminMixin:
         return super().save_model(request, obj, form, change)
 
 
+class BusinessForm(forms.ModelForm):
+    class Meta:
+        model = Business
+        fields = "__all__"
+        labels = {
+            "name": "Название",
+            "brand_name": "Бренд",
+            "address": "Адрес",
+            "city": "Город",
+            "slug": "Слаг (часть URL)",
+            "working_hours": "Часы работы",
+            "timezone_name": "Часовой пояс",
+            "ai_settings": "Настройки ИИ",
+            "ai_rules": "Правила ИИ",
+            "knowledge_base": "База знаний",
+            "cancellation_policy_hours": "Порог отмены (часов)",
+            "is_active": "Активен",
+            "green_api_instance_id": "Green-API instance ID",
+            "green_api_api_token": "Green-API API token",
+            "green_api_api_url": "Green-API URL (опционально)",
+            "telegram_bot_token": "Telegram bot token",
+            "telegram_webhook_secret": "Telegram webhook secret",
+        }
+
+
 @admin.register(Business)
 class BusinessAdmin(TenantScopedAdminMixin, ModelAdmin):
+    form = BusinessForm
     business_filter_field = "pk"
     list_display = ("name", "timezone_name", "colored_active", "created_at")
     list_filter = ("is_active",)
@@ -1759,7 +1797,9 @@ class BookingAdmin(TenantScopedAdminMixin, ModelAdmin):
 
     @display(description="Статус", label=BOOKING_STATUS_LABELS)
     def colored_status(self, obj):
-        return obj.status
+        # Tuple (color_key, display_text): keeps the coloured badge wired
+        # by status value while showing a human Russian label inside.
+        return (obj.status, BOOKING_STATUS_RU.get(obj.status, obj.status))
 
     @display(description="Клиент", ordering="client__name")
     def client_display(self, obj):

@@ -125,8 +125,8 @@ class Business(TimeStampedModel):
 
     class Meta:
         ordering = ("name",)
-        verbose_name = _("business")
-        verbose_name_plural = _("businesses")
+        verbose_name = _("Салон")
+        verbose_name_plural = _("Салоны")
         constraints = [
             models.UniqueConstraint(
                 fields=("green_api_instance_id",),
@@ -194,8 +194,8 @@ class Master(TimeStampedModel):
 
     class Meta:
         ordering = ("full_name",)
-        verbose_name = _("master")
-        verbose_name_plural = _("masters")
+        verbose_name = _("Мастер")
+        verbose_name_plural = _("Мастера")
         constraints = [
             models.UniqueConstraint(
                 fields=("business", "full_name"),
@@ -232,8 +232,8 @@ class MasterUnavailability(TimeStampedModel):
 
     class Meta:
         ordering = ("start_time", "master__full_name")
-        verbose_name = _("master unavailability")
-        verbose_name_plural = _("master unavailabilities")
+        verbose_name = _("Отсутствие мастера")
+        verbose_name_plural = _("Отсутствия мастеров")
         indexes = [
             models.Index(fields=("business", "start_time", "end_time")),
             models.Index(fields=("master", "start_time", "end_time")),
@@ -285,8 +285,8 @@ class Category(TimeStampedModel):
 
     class Meta:
         ordering = ("name",)
-        verbose_name = _("category")
-        verbose_name_plural = _("categories")
+        verbose_name = _("Категория")
+        verbose_name_plural = _("Категории")
         constraints = [
             models.UniqueConstraint(
                 fields=("business", "name"),
@@ -323,8 +323,8 @@ class Service(TimeStampedModel):
 
     class Meta:
         ordering = ("name",)
-        verbose_name = _("service")
-        verbose_name_plural = _("services")
+        verbose_name = _("Услуга")
+        verbose_name_plural = _("Услуги")
         constraints = [
             models.UniqueConstraint(
                 fields=("business", "name"),
@@ -364,11 +364,11 @@ class BookingQuerySet(models.QuerySet):
 
 class Booking(TimeStampedModel):
     class Status(models.TextChoices):
-        CONFIRMED = "confirmed", _("Confirmed")
-        PENDING = "pending", _("Pending")
-        CANCELLED = "cancelled", _("Cancelled")
-        NO_SHOW = "no_show", _("No show")
-        NEEDS_ATTENTION = "needs_attention", _("Needs attention")
+        CONFIRMED = "confirmed", _("Подтверждена")
+        PENDING = "pending", _("Ожидает")
+        CANCELLED = "cancelled", _("Отменена")
+        NO_SHOW = "no_show", _("Неявка")
+        NEEDS_ATTENTION = "needs_attention", _("Нужна проверка")
 
     business = models.ForeignKey(
         Business,
@@ -417,8 +417,8 @@ class Booking(TimeStampedModel):
 
     class Meta:
         ordering = ("start_time",)
-        verbose_name = _("booking")
-        verbose_name_plural = _("bookings")
+        verbose_name = _("Бронирование")
+        verbose_name_plural = _("Бронирования")
         indexes = [
             models.Index(fields=("business", "start_time")),
             models.Index(fields=("master", "start_time", "status")),
@@ -639,8 +639,8 @@ class Client(TimeStampedModel):
 
     class Meta:
         ordering = ("name", "phone")
-        verbose_name = _("client")
-        verbose_name_plural = _("clients")
+        verbose_name = _("Клиент")
+        verbose_name_plural = _("Клиенты")
         constraints = [
             models.UniqueConstraint(
                 fields=("business", "phone"),
@@ -859,8 +859,8 @@ class ConversationMessage(TimeStampedModel):
 
     class Meta:
         ordering = ("created_at", "id")
-        verbose_name = _("conversation message")
-        verbose_name_plural = _("conversation messages")
+        verbose_name = _("Сообщение в диалоге")
+        verbose_name_plural = _("Сообщения в диалогах")
         indexes = [
             models.Index(fields=("business", "client", "channel", "created_at")),
         ]
@@ -928,8 +928,8 @@ class ConversationThread(TimeStampedModel):
 
     class Meta:
         ordering = ("business_id", "client_id", "channel")
-        verbose_name = _("conversation thread")
-        verbose_name_plural = _("conversation threads")
+        verbose_name = _("Диалог")
+        verbose_name_plural = _("Диалоги")
         constraints = [
             models.UniqueConstraint(
                 fields=("business", "client", "channel"),
@@ -1032,8 +1032,8 @@ class BookingSession(TimeStampedModel):
 
     class Meta:
         ordering = ("business_id", "client_id", "channel")
-        verbose_name = _("booking session")
-        verbose_name_plural = _("booking sessions")
+        verbose_name = _("Сессия бронирования")
+        verbose_name_plural = _("Сессии бронирования")
         constraints = [
             models.UniqueConstraint(
                 fields=("business", "client", "channel"),
