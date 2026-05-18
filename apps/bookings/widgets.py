@@ -1,9 +1,13 @@
 """Custom form widgets for the bookings admin.
 
-Currently a single widget — ``WorkingHoursWidget`` — that replaces the
-raw JSON ``<textarea>`` for ``Master.working_hours`` with a 7-row table
-of [check] [time start] [time end] inputs, one row per weekday.
+- ``WorkingHoursWidget`` replaces the raw JSON ``<textarea>`` for
+  ``Master.working_hours`` with a 7-row table of weekday rows.
+- ``DurationHoursMinutesWidget`` replaces Django's stock
+  ``HH:MM:SS`` text input on ``DurationField`` with two number inputs
+  (hours / minutes) — much more obvious for a salon owner.
 """
+
+from datetime import timedelta
 
 from django import forms
 from django.utils.safestring import mark_safe
@@ -136,5 +140,91 @@ class WorkingHoursWidget(forms.Widget):
             <p class="mt-1.5 text-[11px] text-base-400 dark:text-base-500">
               Снимите галочку, чтобы пометить день как выходной.
             </p>
+            """
+        )
+
+
+class DurationHoursMinutesWidget(forms.Widget):
+    """Render a ``DurationField`` as two number inputs: hours + minutes.
+
+    Django's default DurationField widget is a plain ``<input type=text>``
+    expecting ``HH:MM:SS`` — unintuitive for a salon owner who just wants
+    to say "45 минут" or "1 час 30 минут". This widget collects two
+    separate ints and packs them back into the canonical
+    ``HH:MM:SS`` string that DurationField.to_python accepts.
+
+    Empty / zero is allowed — useful for ``buffer_time`` where 0 minutes
+    is a valid value meaning "no buffer needed".
+    """
+
+    template_name = None  # rendered inline, no external template
+
+    def value_from_datadict(self, data, files, name):
+        hours_raw = (data.get(f"{name}_hours") or "0").strip() or "0"
+        minutes_raw = (data.get(f"{name}_minutes") or "0").strip() or "0"
+        try:
+            hours = max(int(hours_raw), 0)
+            minutes = max(int(minutes_raw), 0)
+        except (TypeError, ValueError):
+            # Bad input — let DurationField raise a validation error on ""
+            return ""
+        total_seconds = hours * 3600 + minutes * 60
+        # DurationField.to_python accepts "HH:MM:SS" exactly.
+        td = timedelta(seconds=total_seconds)
+        # Normalise: split into days/hours/minutes/seconds for HH:MM:SS.
+        total_minutes, secs = divmod(int(td.total_seconds()), 60)
+        h, m = divmod(total_minutes, 60)
+        return f"{h:02d}:{m:02d}:{secs:02d}"
+
+    def _decompose(self, value):
+        """Extract (hours, minutes) for the bound input.
+
+        ``value`` may arrive as a ``timedelta`` (from model.refresh) or
+        a string ("HH:MM:SS" — from form rebind after validation error).
+        """
+        if value is None or value == "":
+            return 0, 0
+        if isinstance(value, timedelta):
+            total_minutes = int(value.total_seconds() // 60)
+        else:
+            try:
+                parts = str(value).split(":")
+                total_minutes = int(parts[0]) * 60 + int(parts[1])
+            except (ValueError, IndexError):
+                total_minutes = 0
+        if total_minutes < 0:
+            total_minutes = 0
+        return divmod(total_minutes, 60)
+
+    def render(self, name, value, attrs=None, renderer=None):
+        hours, minutes = self._decompose(value)
+        input_class = (
+            "px-2 py-1 rounded border border-base-200 dark:border-base-700 "
+            "bg-white dark:bg-base-900 text-base-900 dark:text-base-100 w-20"
+        )
+        input_style = "accent-color: rgb(37 99 235); color-scheme: light dark;"
+        label_class = "text-base-500 dark:text-base-400 text-[13px]"
+        return mark_safe(
+            f"""
+            <span class="inline-flex items-center gap-2"
+                  style="font-variant-numeric: tabular-nums;">
+              <input type="number"
+                     name="{name}_hours"
+                     value="{hours}"
+                     min="0"
+                     step="1"
+                     class="{input_class}"
+                     style="{input_style}">
+              <span class="{label_class}">ч</span>
+              <input type="number"
+                     name="{name}_minutes"
+                     value="{minutes}"
+                     min="0"
+                     max="59"
+                     step="5"
+                     class="{input_class}"
+                     style="{input_style}">
+              <span class="{label_class}">мин</span>
+            </span>
             """
         )

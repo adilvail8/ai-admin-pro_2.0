@@ -44,7 +44,7 @@ from .models import (
     WEEKDAY_KEYS,
 )
 from .services import create_appointment, update_booking_status
-from .widgets import WorkingHoursWidget
+from .widgets import DurationHoursMinutesWidget, WorkingHoursWidget
 from .tasks import (
     dispatch_outbound_delivery,
     get_client_channel,
@@ -1154,8 +1154,21 @@ class BusinessAdmin(TenantScopedAdminMixin, ModelAdmin):
         )
 
 
+class CategoryForm(forms.ModelForm):
+    class Meta:
+        model = Category
+        fields = "__all__"
+        labels = {
+            "business": "Салон",
+            "name": "Название",
+            "description": "Описание",
+            "is_active": "Активна",
+        }
+
+
 @admin.register(Category)
 class CategoryAdmin(TenantScopedAdminMixin, ModelAdmin):
+    form = CategoryForm
     list_display = ("name", "business", "colored_active", "created_at")
     list_filter = ("business", "is_active")
     search_fields = ("name", "description")
@@ -1396,8 +1409,35 @@ class TenantCategoryListFilter(admin.SimpleListFilter):
         return queryset
 
 
+class ServiceForm(forms.ModelForm):
+    class Meta:
+        model = Service
+        fields = "__all__"
+        labels = {
+            "business": "Салон",
+            "category": "Категория",
+            "name": "Название",
+            "price": "Цена (₸)",
+            "duration": "Длительность",
+            "buffer_time": "Буфер после услуги",
+            "is_active": "Активна",
+        }
+        help_texts = {
+            "price": "Цена в тенге. Например: 9000.",
+            "buffer_time": (
+                "Свободное время после услуги для уборки / перерыва. "
+                "Поставьте 0, если буфер не нужен."
+            ),
+        }
+        widgets = {
+            "duration": DurationHoursMinutesWidget,
+            "buffer_time": DurationHoursMinutesWidget,
+        }
+
+
 @admin.register(Service)
 class ServiceAdmin(TenantScopedAdminMixin, ModelAdmin):
+    form = ServiceForm
     business_related_fields = ("category",)
     list_display = (
         "name_display",

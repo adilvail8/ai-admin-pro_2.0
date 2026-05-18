@@ -11013,3 +11013,61 @@ def test_telegram_transport_raises_when_no_token_anywhere(business):
             text="hi",
             metadata=None,
         )
+
+
+# ---------------------------------------------------------------------------
+# DurationHoursMinutesWidget — Service duration / buffer_time editor
+# ---------------------------------------------------------------------------
+
+
+def test_duration_hours_minutes_widget_packs_hours_and_minutes_into_hhmmss():
+    """The widget collects two number inputs and emits a string
+    DurationField.to_python accepts. Owners must never see `HH:MM:SS`
+    in the form."""
+    from apps.bookings.widgets import DurationHoursMinutesWidget
+
+    widget = DurationHoursMinutesWidget()
+
+    assert (
+        widget.value_from_datadict(
+            {"duration_hours": "1", "duration_minutes": "30"},
+            {},
+            "duration",
+        )
+        == "01:30:00"
+    )
+    assert (
+        widget.value_from_datadict(
+            {"duration_hours": "0", "duration_minutes": "45"},
+            {},
+            "duration",
+        )
+        == "00:45:00"
+    )
+    # Missing → 00:00:00 (valid for buffer_time=0).
+    assert widget.value_from_datadict({}, {}, "duration") == "00:00:00"
+    # Garbage input doesn't crash — returns "" so DurationField raises.
+    assert (
+        widget.value_from_datadict(
+            {"duration_hours": "abc", "duration_minutes": "30"},
+            {},
+            "duration",
+        )
+        == ""
+    )
+
+
+def test_duration_hours_minutes_widget_decomposes_timedelta_for_render():
+    """When the bound form re-renders an existing service (change
+    view), the widget must show the timedelta as two integer inputs —
+    not the raw HH:MM:SS string."""
+    from apps.bookings.widgets import DurationHoursMinutesWidget
+
+    widget = DurationHoursMinutesWidget()
+
+    assert widget._decompose(timedelta(minutes=45)) == (0, 45)
+    assert widget._decompose(timedelta(hours=1, minutes=30)) == (1, 30)
+    assert widget._decompose(timedelta()) == (0, 0)
+    assert widget._decompose(None) == (0, 0)
+    # Already a string (form rebind after validation error).
+    assert widget._decompose("01:15:00") == (1, 15)
