@@ -8730,6 +8730,7 @@ def test_owner_admin_index_renders_salon_dashboard(
     client_profile,
     master,
     service,
+    monkeypatch,
 ):
     owner_user.is_staff = True
     owner_user.save(update_fields=["is_staff"])
@@ -8737,6 +8738,15 @@ def test_owner_admin_index_renders_salon_dashboard(
     master.save(update_fields=["business"])
     service.business = business_membership.business
     service.save(update_fields=["business"])
+    # Freeze `now` at 10:00 UTC on a fixed date so the "today" window
+    # doesn't drift across midnight in TIME_ZONE=Asia/Almaty (UTC+5):
+    # otherwise running the suite after ~19:00 UTC pushes `now + 30 min`
+    # into local "tomorrow" and bookings_today flips from 1 to 0.
+    import datetime as _dt
+    frozen_now = _dt.datetime(2026, 5, 15, 10, 0, tzinfo=_dt.timezone.utc)
+    monkeypatch.setattr(
+        "django.utils.timezone.now", lambda: frozen_now
+    )
     now = timezone.now()
     Booking.objects.create(
         business=business_membership.business,
