@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import timedelta
 from hashlib import sha256
 
@@ -63,6 +64,9 @@ from .webhooks import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
 UNSUPPORTED_MEDIA_MESSAGE = (
     "Пока я понимаю только текстовые сообщения. "
     "Напишите, пожалуйста, ваш вопрос текстом, и я сразу помогу."
@@ -118,6 +122,62 @@ def download_whatsapp_audio(payload: dict):
         except Exception:
             continue
     return None
+
+
+def download_telegram_voice(payload: dict, business):
+    """Скачать голосовое из Telegram через Bot API getFile + file download.
+
+    Два последовательных GET-а: метаданные (≤8s) + бинарь (≤15s). Суммарно
+    под бюджет вебхука Telegram (~25-30s до тайм-аута). На любую ошибку
+    возвращаем None — выше по стеку сработает voice_fallback.
+    """
+    file_id = str(payload.get("telegram_file_id", "")).strip()
+    if not file_id:
+        return None
+
+    bot_token = (
+        getattr(business, "telegram_bot_token", "") or settings.TELEGRAM_BOT_TOKEN
+    )
+    if not bot_token:
+        return None
+
+    try:
+        meta_response = httpx.get(
+            f"https://api.telegram.org/bot{bot_token}/getFile",
+            params={"file_id": file_id},
+            timeout=8.0,
+        )
+        meta_response.raise_for_status()
+        file_path = (
+            meta_response.json().get("result", {}).get("file_path", "")
+        )
+        if not file_path:
+            return None
+
+        file_response = httpx.get(
+            f"https://api.telegram.org/file/bot{bot_token}/{file_path}",
+            timeout=15.0,
+        )
+        file_response.raise_for_status()
+    except Exception:
+        logger.exception("telegram_voice_download_failed")
+        return None
+
+    content_type = (
+        file_response.headers.get("Content-Type", "")
+        or payload.get("audio_mime_type", "")
+        or "audio/ogg"
+    )
+    extension = ".oga"
+    if "mpeg" in content_type:
+        extension = ".mp3"
+    elif "wav" in content_type:
+        extension = ".wav"
+    return SimpleUploadedFile(
+        f"voice{extension}",
+        file_response.content,
+        content_type=content_type,
+    )
 
 
 def normalize_whatsapp_green_api_payload(payload: dict, business_id: int) -> dict:
@@ -210,6 +270,7 @@ def process_webhook_request(*, payload: dict, request, channel: str):
         audio_file = (
             request.FILES.get("audio")
             or request.FILES.get("voice")
+            or download_telegram_voice(payload, business)
             or download_whatsapp_audio(payload)
         )
         preferred_language = detect_client_language(

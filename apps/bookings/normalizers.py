@@ -353,4 +353,9 @@ def legacy_payload_from_internal_event(event: InternalEvent) -> dict:
         "audio_download_url": event["message"]["file_url"] if event["event_type"] == "voice" else "",
         "audio_mime_type": event["message"]["mime_type"] if event["event_type"] == "voice" else "",
         "audio_file_name": "",
+        "telegram_file_id": (
+            event["message"]["file_id"]
+            if event.get("source") == "telegram" and event["event_type"] == "voice"
+            else ""
+        ),
     }

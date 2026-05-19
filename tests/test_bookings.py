@@ -6953,7 +6953,97 @@ def test_telegram_webhook_routes_voice_event_through_internal_event_dispatch(
     assert captured["payload"]["external_id"] == "tg:700002"
     assert captured["payload"]["media_type"] == "voice"
     assert captured["payload"]["audio_download_url"] == ""
+    assert captured["payload"]["telegram_file_id"] == "voice-file-id"
     assert captured["payload"]["text"] == ""
+
+
+@pytest.mark.django_db
+def test_download_telegram_voice_fetches_via_getfile(business, monkeypatch):
+    from apps.bookings import views as views_module
+
+    calls = []
+
+    def fake_get(url, params=None, timeout=None, **kwargs):
+        calls.append({"url": url, "params": params})
+        if "/getFile" in url:
+            return SimpleNamespace(
+                status_code=200,
+                json=lambda: {"result": {"file_path": "voice/file_42.oga"}},
+                raise_for_status=lambda: None,
+                headers={},
+                content=b"",
+            )
+        return SimpleNamespace(
+            status_code=200,
+            json=lambda: {},
+            raise_for_status=lambda: None,
+            headers={"Content-Type": "audio/ogg"},
+            content=b"OGG-BYTES",
+        )
+
+    monkeypatch.setattr(views_module.httpx, "get", fake_get)
+    business.telegram_bot_token = "BOT-TOKEN-XYZ"
+    business.save(update_fields=["telegram_bot_token"])
+
+    uploaded = views_module.download_telegram_voice(
+        {"telegram_file_id": "voice-file-id"},
+        business,
+    )
+
+    assert uploaded is not None
+    assert uploaded.read() == b"OGG-BYTES"
+    assert uploaded.content_type == "audio/ogg"
+    assert len(calls) == 2
+    assert "BOT-TOKEN-XYZ" in calls[0]["url"]
+    assert calls[0]["params"] == {"file_id": "voice-file-id"}
+    assert "voice/file_42.oga" in calls[1]["url"]
+
+
+@pytest.mark.django_db
+def test_download_telegram_voice_returns_none_without_file_id(business):
+    from apps.bookings import views as views_module
+
+    assert views_module.download_telegram_voice({}, business) is None
+    assert views_module.download_telegram_voice(
+        {"telegram_file_id": "  "}, business,
+    ) is None
+
+
+@pytest.mark.django_db
+def test_download_telegram_voice_returns_none_on_http_failure(
+    business, monkeypatch,
+):
+    import httpx as _httpx
+
+    from apps.bookings import views as views_module
+
+    def boom(*args, **kwargs):
+        raise _httpx.RequestError("boom")
+
+    monkeypatch.setattr(views_module.httpx, "get", boom)
+    business.telegram_bot_token = "BOT-TOKEN-XYZ"
+    business.save(update_fields=["telegram_bot_token"])
+
+    assert views_module.download_telegram_voice(
+        {"telegram_file_id": "voice-file-id"},
+        business,
+    ) is None
+
+
+@pytest.mark.django_db
+def test_download_telegram_voice_returns_none_without_bot_token(
+    business, settings,
+):
+    from apps.bookings import views as views_module
+
+    settings.TELEGRAM_BOT_TOKEN = ""
+    business.telegram_bot_token = ""
+    business.save(update_fields=["telegram_bot_token"])
+
+    assert views_module.download_telegram_voice(
+        {"telegram_file_id": "voice-file-id"},
+        business,
+    ) is None
 
 
 @pytest.mark.django_db
