@@ -326,6 +326,23 @@ def parse_slot_choice(text: str, *, slots: list):
                 if local_start.hour == hour and local_start.minute == minute:
                     return slot
 
+    # Preposition-anchored time wins over a bare number elsewhere in the
+    # text: "23 только на 18" must choose 18:00, not 23:00. If a "на/к/ко/в"
+    # phrase is present but no slot matches, we deliberately do NOT fall
+    # back to the bare-number search — that would re-introduce the bug.
+    preposition_match = re.search(
+        r"\b(?:на|к|ко|в)\s+(\d{1,2})(?::(\d{2}))?\b",
+        normalized,
+    )
+    if preposition_match:
+        hour = int(preposition_match.group(1))
+        minute = int(preposition_match.group(2) or 0)
+        for slot in slots:
+            local_start = timezone.localtime(slot.start)
+            if local_start.hour == hour and local_start.minute == minute:
+                return slot
+        return None
+
     time_match = re.search(r"\b(\d{1,2})(?::(\d{2}))?\b", normalized)
     if not time_match:
         return None

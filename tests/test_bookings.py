@@ -4040,6 +4040,57 @@ def test_reschedule_idle_guard_during_date_flow(
 # === End reschedule flow ========================================================
 
 
+def _make_slot(hour: int, minute: int = 0):
+    tz = timezone.get_current_timezone()
+    start = timezone.make_aware(
+        datetime.combine(timezone.localdate(), time(hour, minute)),
+        tz,
+    )
+    return SimpleNamespace(
+        start=start,
+        end=start + timedelta(minutes=30),
+        master_id=1,
+        master_name="Master",
+    )
+
+
+def test_parse_slot_choice_preposition_wins_over_leading_number():
+    from apps.bookings.date_parser import parse_slot_choice
+
+    slots = [_make_slot(18), _make_slot(23)]
+    chosen = parse_slot_choice("23 только на 18", slots=slots)
+    assert chosen is slots[0]
+
+
+def test_parse_slot_choice_bare_number_still_matches():
+    from apps.bookings.date_parser import parse_slot_choice
+
+    slots = [_make_slot(15)]
+    assert parse_slot_choice("15", slots=slots) is slots[0]
+
+
+def test_parse_slot_choice_bare_time_with_minutes():
+    from apps.bookings.date_parser import parse_slot_choice
+
+    slots = [_make_slot(15, 30)]
+    assert parse_slot_choice("хочу 15:30", slots=slots) is slots[0]
+
+
+def test_parse_slot_choice_preposition_no_match_returns_none():
+    from apps.bookings.date_parser import parse_slot_choice
+
+    slots = [_make_slot(23)]
+    # "на 18" matched but no 18:00 slot — must NOT fall back to bare "23".
+    assert parse_slot_choice("23 только на 18", slots=slots) is None
+
+
+def test_parse_slot_choice_preposition_v_also_works():
+    from apps.bookings.date_parser import parse_slot_choice
+
+    slots = [_make_slot(14), _make_slot(16)]
+    assert parse_slot_choice("давайте в 14", slots=slots) is slots[0]
+
+
 @pytest.mark.django_db
 def test_set_session_service_preserves_reschedule_booking_id(
     business, client_profile, service,
