@@ -9,6 +9,7 @@ No imports from webhooks.py — the dependency graph stays one-way so the
 module can be loaded without circular issues.
 """
 
+import random
 from datetime import datetime, timedelta
 from itertools import islice
 
@@ -26,11 +27,29 @@ from .service_matcher import (
 )
 
 
+# Four greeting variants per language so the bot doesn't sound robotic
+# when a client comes back. Picked uniformly at random — `random` is
+# fine here, this is conversational copy, not a security primitive.
+GREETING_REPLIES = {
+    "ru": (
+        "Здравствуйте! Чем могу помочь?",
+        "Привет! Какая услуга вас интересует?",
+        "Добрый день! Записываем вас?",
+        "Здравствуйте! Рады вас видеть 😊",
+    ),
+    "kz": (
+        "Сәлеметсіз бе! Қалай көмектесейін?",
+        "Сәлем! Қандай қызмет қызықтырады?",
+        "Қайырлы күн! Жазылайық па?",
+        "Сәлеметсіз бе! Сізді көргенімізге қуаныштымыз 😊",
+    ),
+}
+
+
 # --- Tier 1: pure (no model/helper dependencies) --------------------------
 def build_greeting_reply(*, language: str) -> str:
-    if language == "kz":
-        return "Сәлеметсіз бе! Қандай қызметке жазылайын?"
-    return "Здравствуйте! На какую услугу хотите записаться?"
+    variants = GREETING_REPLIES.get(language, GREETING_REPLIES["ru"])
+    return random.choice(variants)
 
 
 def build_booking_intent_clarification_reply(*, language: str) -> str:

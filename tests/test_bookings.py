@@ -5295,7 +5295,10 @@ def test_handle_text_message_greeting_does_not_reuse_old_child_context(
 
     assert response["escalated"] is False
     assert "сына" not in response["reply"].lower()
-    assert response["reply"] == "Здравствуйте! На какую услугу хотите записаться?"
+    # build_greeting_reply now rotates across 4 variants so the bot
+    # doesn't sound robotic — assert membership instead of equality.
+    from apps.bookings.replies import GREETING_REPLIES
+    assert response["reply"] in GREETING_REPLIES["ru"]
 
 
 @pytest.mark.django_db
@@ -11065,6 +11068,139 @@ def test_duration_hours_minutes_widget_packs_hours_and_minutes_into_hhmmss():
         )
         == ""
     )
+
+
+@pytest.mark.django_db
+def test_infer_service_returns_none_for_bare_strizhka_with_multiple_haircuts(business):
+    """Bug regression: when several haircut services coexist, bare
+    «стрижка» must NOT lock onto the alphabetically-first one (that
+    was the original Fade/Men's/Kids confusion). Token scoring lands
+    at 0.5 on each candidate (matched=1 / unmatched=1), which is below
+    the 1.0 threshold — and the Pass 2 «стриж» universal marker no
+    longer fires when more than one haircut exists. Result: None →
+    AI can ask a clarifying question."""
+    Service.objects.create(
+        business=business,
+        name="Fade Haircut",
+        price=Decimal("9000"),
+        duration=timedelta(minutes=75),
+    )
+    Service.objects.create(
+        business=business,
+        name="Men's Haircut",
+        price=Decimal("7000"),
+        duration=timedelta(minutes=60),
+    )
+    Service.objects.create(
+        business=business,
+        name="Kids Haircut",
+        price=Decimal("5000"),
+        duration=timedelta(minutes=40),
+    )
+
+    assert (
+        infer_service_from_messages(business=business, texts=["стрижка"]) is None
+    )
+
+
+@pytest.mark.django_db
+def test_infer_service_picks_fade_for_compound_word_strizhka(business):
+    fade = Service.objects.create(
+        business=business,
+        name="Fade Haircut",
+        price=Decimal("9000"),
+        duration=timedelta(minutes=75),
+    )
+    Service.objects.create(
+        business=business,
+        name="Men's Haircut",
+        price=Decimal("7000"),
+        duration=timedelta(minutes=60),
+    )
+
+    # «фейд-стрижка» splits into tokens ["фейд", "стрижка"] — both
+    # match Fade's localized name in full → score 2.0.
+    assert (
+        infer_service_from_messages(business=business, texts=["фейд-стрижка"])
+        == fade
+    )
+
+
+@pytest.mark.django_db
+def test_infer_service_returns_none_for_typo(business):
+    """Typo «стришка» (а не «стрижка») diverges at the 5th stem char
+    — neither token Pass nor Pass 2 should fabricate a match. AI is
+    a better fallback than guessing."""
+    Service.objects.create(
+        business=business,
+        name="Fade Haircut",
+        price=Decimal("9000"),
+        duration=timedelta(minutes=75),
+    )
+    Service.objects.create(
+        business=business,
+        name="Men's Haircut",
+        price=Decimal("7000"),
+        duration=timedelta(minutes=60),
+    )
+
+    assert (
+        infer_service_from_messages(business=business, texts=["хочу стришка"])
+        is None
+    )
+
+
+@pytest.mark.django_db
+def test_infer_service_picks_mens_for_explicit_qualifier(business):
+    mens = Service.objects.create(
+        business=business,
+        name="Men's Haircut",
+        price=Decimal("7000"),
+        duration=timedelta(minutes=60),
+    )
+    Service.objects.create(
+        business=business,
+        name="Fade Haircut",
+        price=Decimal("9000"),
+        duration=timedelta(minutes=75),
+    )
+
+    # «мужская стрижка» matches Men's localized name ("мужская
+    # стрижка") cleanly — both tokens covered, no penalty → 2.0.
+    assert (
+        infer_service_from_messages(
+            business=business, texts=["хочу мужскую стрижку"]
+        )
+        == mens
+    )
+
+
+def test_build_greeting_reply_has_four_variants_per_language():
+    from apps.bookings.replies import GREETING_REPLIES
+
+    assert len(GREETING_REPLIES["ru"]) == 4
+    assert len(GREETING_REPLIES["kz"]) == 4
+    # Variants must be distinct strings — guards against a copy-paste
+    # regression where two slots end up identical.
+    assert len(set(GREETING_REPLIES["ru"])) == 4
+    assert len(set(GREETING_REPLIES["kz"])) == 4
+
+
+def test_build_greeting_reply_returns_one_of_known_variants(monkeypatch):
+    """Smoke that random.choice picks from the right pool: force
+    `random.choice` to return its first argument and verify the result
+    is in GREETING_REPLIES[language]."""
+    from apps.bookings import replies as replies_module
+    from apps.bookings.replies import build_greeting_reply, GREETING_REPLIES
+
+    monkeypatch.setattr(replies_module.random, "choice", lambda seq: seq[0])
+    ru = build_greeting_reply(language="ru")
+    kz = build_greeting_reply(language="kz")
+    assert ru == GREETING_REPLIES["ru"][0]
+    assert kz == GREETING_REPLIES["kz"][0]
+    # Unknown language falls back to ru pool.
+    other = build_greeting_reply(language="en")
+    assert other in GREETING_REPLIES["ru"]
 
 
 def test_duration_hours_minutes_widget_decomposes_timedelta_for_render():

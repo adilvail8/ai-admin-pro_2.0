@@ -6,8 +6,58 @@ only on Business/Service/Master models and the language helpers — no
 imports from webhooks/replies, so it stays cycle-free.
 """
 
+import re
+
 from .language import localize_service_name
 from .models import Business
+
+
+_WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
+_STEM_LEN = 5
+_TOKEN_MIN_LEN = 3
+_SCORE_THRESHOLD = 1.0
+
+
+def _tokenize(text: str) -> list[str]:
+    """Split text into word tokens, dropping anything shorter than 3 chars.
+
+    Short tokens (predlogi like «и», single-letter abbreviations) just
+    add noise to the overlap score, and the regex strips punctuation so
+    «фейд-стрижка» splits into ["фейд", "стрижка"] (not a single token).
+    """
+    return [t for t in _WORD_RE.findall(text.lower()) if len(t) >= _TOKEN_MIN_LEN]
+
+
+def _stem_match(a: str, b: str) -> bool:
+    """Tokens count as a match if their first 5 chars agree.
+
+    Catches Russian inflection (стрижка / стрижку / стрижки → стриж),
+    but a typo like «стришка» fails because the 5-char stem «стриш»
+    diverges from «стриж». For tokens shorter than 5 chars we fall back
+    to strict equality so common 3- or 4-letter words (e.g. «фейд»,
+    «fade») still match exactly.
+    """
+    if len(a) < _STEM_LEN or len(b) < _STEM_LEN:
+        return a == b
+    return a[:_STEM_LEN] == b[:_STEM_LEN]
+
+
+def _service_name_token_score(text_tokens: list[str], name_tokens: list[str]) -> float:
+    """``matched - 0.5 * unmatched`` over the service's tokens.
+
+    Penalises service names with qualifier tokens not present in the
+    user's text — bare «стрижка» should not steal the score from
+    «фейд-стрижка» just because both contain «стрижка».
+    """
+    if not name_tokens:
+        return 0.0
+    matched = sum(
+        1 for nt in name_tokens if any(_stem_match(tt, nt) for tt in text_tokens)
+    )
+    if matched == 0:
+        return 0.0
+    unmatched = len(name_tokens) - matched
+    return matched - 0.5 * unmatched
 
 
 def infer_service_from_messages(*, business: Business, texts: list[str]):
@@ -64,30 +114,44 @@ def infer_service_from_messages(*, business: Business, texts: list[str]):
             if not any(marker in text for marker in beard_markers):
                 return mens_haircut_service
 
-    # Pass 1 — specific match: текст содержит подстроку самого имени
-    # сервиса (или его локализованной формы). Это закрывает баг, когда
-    # «фейд-стрижка» матчилось на первую попавшуюся haircut-услугу из
-    # services (отсортированы по алфавиту), а не на ту, чьё имя реально
-    # упомянуто. Сначала ищем точное вхождение по полному имени
-    # сервиса, и только если ни одно полное имя не найдено — падаем
-    # в общий fallback (Pass 2 ниже) с короткими aliases.
+    # Pass 1 — token-overlap scoring: tokenize the user's text and each
+    # candidate service name, then award the service whose name tokens
+    # are best covered by the user's tokens. Score combines match count
+    # with a penalty for service tokens left uncovered, so:
+    #   bare «стрижка» does NOT win Fade Haircut («фейд-стрижка»):
+    #     matched=1 / unmatched=1 → 0.5  — below threshold, fall through
+    #   «фейд-стрижка» wins Fade cleanly:
+    #     matched=2 / unmatched=0 → 2.0  — above threshold, return
+    #   typo «стришка» wins nothing — 5-char stem «стриш» ≠ «стриж».
+    # Tie-break: shorter service name (more specific). Words ≤ 5 chars
+    # match strictly, longer words compare by 5-char stem (Russian
+    # inflection tolerance).
     for text in reversed(normalized_texts):
+        text_tokens = _tokenize(text)
+        if not text_tokens:
+            continue
         best_match = None
-        best_len = 0
+        best_score = 0.0
+        best_name_len = float("inf")
         for service in services:
-            specific_variants = {
-                service.name.lower(),
-                localize_service_name(service.name, "ru").lower(),
-                localize_service_name(service.name, "kz").lower(),
-            }
-            specific_variants.discard("")
-            for variant in specific_variants:
-                # Минимум 4 символа, чтобы «hair» не матчился на любой
-                # сервис со словом «hair».
-                if len(variant) >= 4 and variant in text and len(variant) > best_len:
+            for variant_name in (
+                service.name,
+                localize_service_name(service.name, "ru"),
+                localize_service_name(service.name, "kz"),
+            ):
+                name_tokens = _tokenize(variant_name)
+                if not name_tokens:
+                    continue
+                score = _service_name_token_score(text_tokens, name_tokens)
+                if score <= 0:
+                    continue
+                if score > best_score or (
+                    score == best_score and len(name_tokens) < best_name_len
+                ):
                     best_match = service
-                    best_len = len(variant)
-        if best_match is not None:
+                    best_score = score
+                    best_name_len = len(name_tokens)
+        if best_match is not None and best_score >= _SCORE_THRESHOLD:
             return best_match
 
     service_aliases = {
@@ -131,7 +195,19 @@ def infer_service_from_messages(*, business: Business, texts: list[str]):
             variants.update(service_aliases.get(service.name, ()))
             lowered_name = service.name.lower()
             if "haircut" in lowered_name:
-                variants.update({"стриж", "шаш қию", "шаш кию", "кроп"})
+                variants.update({"шаш қию", "шаш кию", "кроп"})
+                # «стриж» is only safe to add when the business has a
+                # single haircut service — otherwise the alphabetically
+                # first haircut absorbed a bare «стрижка» query (the
+                # original Fade-vs-Men's-vs-Kids bug). With multiple
+                # haircut services the user must qualify (фейд /
+                # мужская / детская) — Pass 1 token scoring handles
+                # those, this fallback would only get in its way.
+                haircut_count = sum(
+                    1 for s in services if "haircut" in s.name.lower()
+                )
+                if haircut_count == 1:
+                    variants.add("стриж")
             if "lash" in lowered_name:
                 variants.update({"ресниц", "реснич", "кірпік", "кирпик"})
             if "manicure" in lowered_name:
