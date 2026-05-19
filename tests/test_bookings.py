@@ -130,6 +130,7 @@ from apps.bookings.webhooks import (
     build_reschedule_no_active_bookings_reply,
     build_reschedule_success_reply,
     get_client_active_bookings,
+    get_latest_active_booking,
     build_date_selection_reply,
     build_existing_booking_reply,
     build_master_list_reply,
@@ -5851,6 +5852,84 @@ def test_get_client_active_bookings_includes_needs_attention(
     )
 
     assert flagged.id in [b.id for b in result]
+
+
+@pytest.mark.django_db
+def test_get_latest_active_booking_includes_needs_attention(
+    business, client_profile, master, service,
+):
+    flagged = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(days=2),
+        client_data={"name": "Aigerim"},
+        status=Booking.Status.NEEDS_ATTENTION,
+    )
+
+    result = get_latest_active_booking(
+        business_id=business.id, client=client_profile,
+    )
+
+    assert result is not None
+    assert result.id == flagged.id
+
+
+@pytest.mark.django_db
+def test_get_latest_active_booking_excludes_past_bookings(
+    business, client_profile, master, service,
+):
+    past = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(days=1),
+        client_data={"name": "Aigerim"},
+        status=Booking.Status.CONFIRMED,
+    )
+    # Booking.save() blocks past start_time on insert; rewrite via
+    # QuerySet.update to simulate a booking whose time has elapsed.
+    Booking.objects.filter(pk=past.pk).update(
+        start_time=timezone.now() - timedelta(days=1),
+    )
+
+    result = get_latest_active_booking(
+        business_id=business.id, client=client_profile,
+    )
+    assert result is None
+
+
+@pytest.mark.django_db
+def test_get_latest_active_booking_returns_most_recently_created(
+    business, client_profile, master, service,
+):
+    older = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(days=5),
+        client_data={"name": "Aigerim"},
+        status=Booking.Status.CONFIRMED,
+    )
+    newer = Booking.objects.create(
+        business=business,
+        client=client_profile,
+        master=master,
+        service=service,
+        start_time=timezone.now() + timedelta(days=3),
+        client_data={"name": "Aigerim"},
+        status=Booking.Status.CONFIRMED,
+    )
+    assert newer.created_at >= older.created_at
+
+    result = get_latest_active_booking(
+        business_id=business.id, client=client_profile,
+    )
+    assert result is not None
+    assert result.id == newer.id
 
 
 def test_build_cancellation_no_active_bookings_reply_localized():

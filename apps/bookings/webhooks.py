@@ -206,11 +206,21 @@ def mark_inbound_event_failed(event: InboundEvent):
 
 
 def get_latest_active_booking(*, business_id: int, client: Client):
+    # NEEDS_ATTENTION is an active future appointment flagged for the
+    # operator — the bot must still recognise it as the client's current
+    # booking when generating contextual replies. Past bookings are
+    # excluded outright so a freshly created future booking always wins
+    # over any stale history.
     return (
         Booking.objects.filter(
             business_id=business_id,
             client=client,
-            status__in=[Booking.Status.PENDING, Booking.Status.CONFIRMED],
+            status__in=[
+                Booking.Status.PENDING,
+                Booking.Status.CONFIRMED,
+                Booking.Status.NEEDS_ATTENTION,
+            ],
+            start_time__gt=timezone.now(),
         )
         .order_by("-created_at")
         .first()
