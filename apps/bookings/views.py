@@ -1,3 +1,4 @@
+import io
 import json
 import logging
 from datetime import timedelta
@@ -173,11 +174,13 @@ def download_telegram_voice(payload: dict, business):
         extension = ".mp3"
     elif "wav" in content_type:
         extension = ".wav"
-    return SimpleUploadedFile(
-        f"voice{extension}",
-        file_response.content,
-        content_type=content_type,
-    )
+    # OpenAI SDK ≥1.x требует bytes / io.IOBase / PathLike / tuple — Django
+    # SimpleUploadedFile сюда не подходит. BytesIO наследуется от
+    # io.IOBase, а .name даёт SDK extension hint для определения формата.
+    buffer = io.BytesIO(file_response.content)
+    buffer.name = f"voice{extension}"
+    buffer.content_type = content_type
+    return buffer
 
 
 def normalize_whatsapp_green_api_payload(payload: dict, business_id: int) -> dict:

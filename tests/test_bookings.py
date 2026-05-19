@@ -7165,7 +7165,11 @@ def test_download_telegram_voice_fetches_via_getfile(business, monkeypatch):
     )
 
     assert uploaded is not None
+    # OpenAI SDK ≥1.x требует io.IOBase — BytesIO подходит, SimpleUploadedFile нет.
+    import io as _io
+    assert isinstance(uploaded, _io.IOBase)
     assert uploaded.read() == b"OGG-BYTES"
+    assert uploaded.name == "voice.oga"
     assert uploaded.content_type == "audio/ogg"
     assert len(calls) == 2
     assert "BOT-TOKEN-XYZ" in calls[0]["url"]
