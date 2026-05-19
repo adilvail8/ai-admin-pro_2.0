@@ -41,6 +41,15 @@ def set_session_service(
     language: str | None = None,
     source: str = "deterministic_flow",
 ) -> BookingSession:
+    # reset() wipes context, which would drop reschedule_booking_id if the
+    # client re-enters the service step mid-reschedule. Preserve the id
+    # across the reset only for the reschedule flow — for a fresh booking
+    # any stale marker must be cleared.
+    preserved_reschedule_id = (
+        session.context.get("reschedule_booking_id")
+        if isinstance(session.context, dict)
+        else None
+    )
     session.reset(keep_expiration=True)
     session.service = service
     session.state = BookingSession.State.AWAITING_DATE
@@ -49,6 +58,8 @@ def set_session_service(
         "language": language or "",
         "source": source,
     }
+    if preserved_reschedule_id and source == "reschedule_flow":
+        session.context["reschedule_booking_id"] = preserved_reschedule_id
     session.touch_expiration()
     session.save()
     return session

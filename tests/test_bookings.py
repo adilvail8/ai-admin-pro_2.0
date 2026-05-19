@@ -4041,6 +4041,50 @@ def test_reschedule_idle_guard_during_date_flow(
 
 
 @pytest.mark.django_db
+def test_set_session_service_preserves_reschedule_booking_id(
+    business, client_profile, service,
+):
+    session = get_or_create_booking_session(
+        business=business,
+        client=client_profile,
+        channel=ConversationMessage.Channel.TELEGRAM,
+    )
+    session.context = {"reschedule_booking_id": 4242}
+    session.save()
+
+    set_session_service(
+        session,
+        service=service,
+        language="ru",
+        source="reschedule_flow",
+    )
+
+    session.refresh_from_db()
+    assert session.context.get("reschedule_booking_id") == 4242
+    assert session.context.get("source") == "reschedule_flow"
+    assert session.state == BookingSession.State.AWAITING_DATE
+
+
+@pytest.mark.django_db
+def test_set_session_service_drops_reschedule_id_for_fresh_booking(
+    business, client_profile, service,
+):
+    session = get_or_create_booking_session(
+        business=business,
+        client=client_profile,
+        channel=ConversationMessage.Channel.TELEGRAM,
+    )
+    session.context = {"reschedule_booking_id": 4242}
+    session.save()
+
+    set_session_service(session, service=service, language="ru")
+
+    session.refresh_from_db()
+    assert "reschedule_booking_id" not in (session.context or {})
+    assert session.context.get("source") == "deterministic_flow"
+
+
+@pytest.mark.django_db
 def test_handle_text_message_offers_real_slots_after_affirming_tomorrow(
     business,
     client_profile,
