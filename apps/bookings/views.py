@@ -115,11 +115,14 @@ def download_whatsapp_audio(payload: dict):
                 extension = ".mp3"
             elif "wav" in content_type:
                 extension = ".wav"
-            return SimpleUploadedFile(
-                payload.get("audio_file_name") or f"voice{extension}",
-                response.content,
-                content_type=content_type or payload.get("audio_mime_type") or "audio/ogg",
+            # OpenAI SDK ≥1.x требует io.IOBase / bytes / PathLike / tuple —
+            # SimpleUploadedFile отклоняется. BytesIO с .name работает.
+            buffer = io.BytesIO(response.content)
+            buffer.name = payload.get("audio_file_name") or f"voice{extension}"
+            buffer.content_type = (
+                content_type or payload.get("audio_mime_type") or "audio/ogg"
             )
+            return buffer
         except Exception:
             continue
     return None
