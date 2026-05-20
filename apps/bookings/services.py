@@ -161,7 +161,16 @@ def get_available_slots(
 ):
     if not business.is_active:
         raise ValidationError("Business is inactive.")
-    service = business.services.get(pk=service_id, is_active=True)
+    try:
+        service = business.services.get(pk=service_id, is_active=True)
+    except business.services.model.DoesNotExist as error:
+        # AI sometimes hallucinates a service_id when the user is vague
+        # (e.g. bare "стрижка" at a multi-haircut salon). Convert the
+        # ORM DoesNotExist into a ValidationError so it round-trips back
+        # to the model as a tool error instead of a hard exception.
+        raise ValidationError(
+            "Selected service is not available for this business."
+        ) from error
     validate_service_level_business_rules(business=business, service=service)
 
     business_tz = get_business_timezone(business)
@@ -590,20 +599,40 @@ def execute_ai_function(
 
     if function_name == "create_appointment":
         business = Business.objects.get(pk=payload["business_id"], is_active=True)
+        # Defensive lookups: AI tool-calls occasionally arrive with stale
+        # or hallucinated ids — translate ORM DoesNotExist into a
+        # ValidationError so the tool returns a structured error to the
+        # LLM (which can retry with a different selection) instead of
+        # blowing up as a hard exception.
+        try:
+            master = business.masters.get(
+                pk=payload["master_id"], is_active=True,
+            )
+        except business.masters.model.DoesNotExist as error:
+            raise ValidationError(
+                "Selected master is not available for this business."
+            ) from error
+        try:
+            service = business.services.get(
+                pk=payload["service_id"], is_active=True,
+            )
+        except business.services.model.DoesNotExist as error:
+            raise ValidationError(
+                "Selected service is not available for this business."
+            ) from error
+        try:
+            client_obj = business.clients.get(
+                pk=payload["client_id"], is_active=True,
+            )
+        except business.clients.model.DoesNotExist as error:
+            raise ValidationError(
+                "Selected client is not available for this business."
+            ) from error
         booking = create_appointment(
             business=business,
-            master=business.masters.get(
-                pk=payload["master_id"],
-                is_active=True,
-            ),
-            service=business.services.get(
-                pk=payload["service_id"],
-                is_active=True,
-            ),
-            client=business.clients.get(
-                pk=payload["client_id"],
-                is_active=True,
-            ),
+            master=master,
+            service=service,
+            client=client_obj,
             start_time=datetime.fromisoformat(payload["start_time"]),
             client_data=payload["client_data"],
         )

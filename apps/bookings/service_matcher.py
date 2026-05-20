@@ -270,3 +270,47 @@ def detect_generic_haircut_request(*, business: Business, text: str) -> bool:
     if any(marker in normalized for marker in female_markers):
         return False
     return True
+
+
+# Generic haircut markers shared by detect_generic_haircut_request and
+# the multi-haircut clarification path. "fade" appears here on purpose:
+# a barbershop without Women's Haircut still needs the clarification
+# when the client says bare "стрижка" / "fade haircut" at a multi-cut
+# business.
+_HAIRCUT_QUERY_MARKERS = (
+    "стриж",
+    "подстричь",
+    "подстричься",
+    "шаш қию",
+    "шаш кию",
+    "haircut",
+    "fade",
+)
+
+
+def is_generic_haircut_query(text: str) -> bool:
+    """True if the message looks like an unqualified "I want a haircut" ask.
+
+    Used in front of the AI fallback: when a multi-haircut business
+    can't unambiguously resolve a service from a bare "стрижка", we
+    short-circuit with a deterministic clarification reply instead of
+    letting the LLM hallucinate a service_id.
+    """
+    normalized = (text or "").strip().lower()
+    if not normalized:
+        return False
+    return any(marker in normalized for marker in _HAIRCUT_QUERY_MARKERS)
+
+
+def get_active_haircut_services(*, business: Business):
+    """Return active services whose name contains a haircut keyword."""
+    haircut_name_markers = ("haircut", "стриж", "шаш")
+    return [
+        service
+        for service in business.services.filter(is_active=True).order_by("name")
+        if any(marker in service.name.lower() for marker in haircut_name_markers)
+    ]
+
+
+def business_has_multiple_haircut_services(business: Business) -> bool:
+    return len(get_active_haircut_services(business=business)) >= 2

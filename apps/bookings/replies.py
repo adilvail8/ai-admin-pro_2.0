@@ -22,6 +22,7 @@ from .language import (
 )
 from .models import Booking, BookingSession, Business, Master
 from .service_matcher import (
+    get_active_haircut_services,
     get_service_recommended_masters,
     infer_service_from_messages,
 )
@@ -482,6 +483,30 @@ def build_date_selection_reply(*, service, language: str) -> str:
     return (
         f"Ок, {service_name}. На какой день записать? "
         "Например: завтра, среда или 25 мая."
+    )
+
+
+def build_multi_haircut_clarification_reply(*, business: Business, language: str) -> str:
+    """Ask which haircut variant when the business has several.
+
+    Distinct from ``build_haircut_clarification_reply`` (which is the
+    binary Men's-vs-Women's prompt for salons with both): this one
+    lists ALL active haircut-named services. Used as a deterministic
+    short-circuit in front of the AI fallback so a bare "стрижка" at a
+    multi-haircut barbershop doesn't reach the LLM (which used to
+    hallucinate a service_id and crash on Service.DoesNotExist).
+    """
+    services = get_active_haircut_services(business=business)
+    names = [localize_service_name(s.name, language) for s in services]
+    listing = ", ".join(names)
+    if language == "kz":
+        return (
+            "Қандай шаш қиюын таңдайсыз? Қол жетімді нұсқалар: "
+            f"{listing}."
+        )
+    return (
+        f"У нас несколько вариантов стрижки: {listing}. "
+        "Какую выбираете?"
     )
 
 

@@ -243,9 +243,13 @@ def service(business):
 
 
 class StubAIManager:
-    def __init__(self, reply="ok", should_fail=False):
+    def __init__(self, reply="ok", should_fail=False, raise_exception=None):
         self.reply = reply
         self.should_fail = should_fail
+        # raise_exception lets a test inject a specific exception class
+        # (e.g. ValidationError vs generic RuntimeError) so the dispatch
+        # logic in webhooks.py can be exercised end-to-end.
+        self.raise_exception = raise_exception
 
     def infer_response_language(self, conversation_messages):
         return "ru"
@@ -257,6 +261,8 @@ class StubAIManager:
         return False
 
     def generate_reply(self, conversation_messages):
+        if self.raise_exception is not None:
+            raise self.raise_exception
         if self.should_fail:
             raise RuntimeError("llm down")
         return self.reply
@@ -1181,6 +1187,64 @@ def test_execute_ai_function_serializes_slots_to_json_payload(
 
     assert isinstance(result, list)
     assert {"start_time", "end_time", "master_id", "master_name"} <= set(result[0].keys())
+
+
+@pytest.mark.django_db
+def test_execute_ai_function_get_free_slots_raises_validationerror_on_unknown_service(
+    business, master, service,
+):
+    # AI hallucinates an id that doesn't exist for this business — instead
+    # of a raw Service.DoesNotExist (which surfaced as the generic
+    # "ai_retry" message), the tool must raise a ValidationError so the
+    # LLM gets a structured error back.
+    with pytest.raises(ValidationError) as excinfo:
+        execute_ai_function(
+            function_name="get_free_slots",
+            payload={
+                "business_id": business.id,
+                "date": (timezone.localdate() + timedelta(days=2)).isoformat(),
+                "service_id": 999999,
+            },
+        )
+    assert "service is not available" in str(excinfo.value).lower()
+
+
+@pytest.mark.django_db
+def test_execute_ai_function_create_appointment_raises_validationerror_on_unknown_service(
+    business, client_profile, master,
+):
+    with pytest.raises(ValidationError) as excinfo:
+        execute_ai_function(
+            function_name="create_appointment",
+            payload={
+                "business_id": business.id,
+                "master_id": master.id,
+                "service_id": 999999,
+                "client_id": client_profile.id,
+                "start_time": (timezone.now() + timedelta(days=2)).isoformat(),
+                "client_data": {"name": "Aiman"},
+            },
+        )
+    assert "service is not available" in str(excinfo.value).lower()
+
+
+@pytest.mark.django_db
+def test_execute_ai_function_create_appointment_raises_validationerror_on_unknown_master(
+    business, client_profile, service,
+):
+    with pytest.raises(ValidationError) as excinfo:
+        execute_ai_function(
+            function_name="create_appointment",
+            payload={
+                "business_id": business.id,
+                "master_id": 999999,
+                "service_id": service.id,
+                "client_id": client_profile.id,
+                "start_time": (timezone.now() + timedelta(days=2)).isoformat(),
+                "client_data": {"name": "Aiman"},
+            },
+        )
+    assert "master is not available" in str(excinfo.value).lower()
 
 
 @pytest.mark.django_db
@@ -6531,6 +6595,133 @@ def test_handle_text_message_service_question_about_haircut_does_not_restart_boo
     assert "мужская или женская" not in response["reply"].lower()
     assert session.state == BookingSession.State.IDLE
     assert session.service_id is None
+
+
+def _make_multi_haircut_business(business):
+    """Add several haircut variants so bare "стрижка" stays ambiguous.
+
+    Mirrors Sultan Barbershop's catalog. The mens/womens pair is
+    deliberately absent — those would trigger the older gendered
+    clarification path, not the multi-haircut one we test here.
+    """
+    category = Category.objects.create(business=business, name="Barber")
+    for name, price in (
+        ("Fade Haircut", "6000.00"),
+        ("Men's Haircut", "5000.00"),
+        ("Kids Haircut", "4000.00"),
+        ("Haircut + Beard Combo", "8000.00"),
+    ):
+        Service.objects.create(
+            business=business,
+            category=category,
+            name=name,
+            price=Decimal(price),
+            duration=timedelta(minutes=45),
+            is_active=True,
+        )
+
+
+@pytest.mark.django_db
+def test_multi_haircut_business_clarifies_bare_haircut_request(
+    business, client_profile,
+):
+    _make_multi_haircut_business(business)
+    # AI should NOT be called — clarification is deterministic.
+    ai_manager = StubAIManager(
+        reply="must-not-be-used",
+        raise_exception=AssertionError("AI must not be reached"),
+    )
+
+    response = handle_text_message(
+        business_id=business.id,
+        channel=ConversationMessage.Channel.TELEGRAM,
+        client=client_profile,
+        text="На стрижку, а какой день свободен?",
+        ai_manager=ai_manager,
+    )
+
+    assert response["escalated"] is False
+    reply_lower = response["reply"].lower()
+    # Lists at least one variant from the catalog.
+    assert "fade" in reply_lower or "фейд" in reply_lower or "стрижк" in reply_lower
+    assert "какую" in reply_lower or "выбираете" in reply_lower
+
+
+@pytest.mark.django_db
+def test_multi_haircut_short_circuit_skipped_for_service_inquiry(
+    business, client_profile,
+):
+    _make_multi_haircut_business(business)
+    ai_manager = StubAIManager(
+        reply="Стрижка занимает около 45 минут.",
+    )
+
+    response = handle_text_message(
+        business_id=business.id,
+        channel=ConversationMessage.Channel.TELEGRAM,
+        client=client_profile,
+        text="а во время стрижки можно поговорить?",
+        ai_manager=ai_manager,
+    )
+
+    # Service inquiry — must reach the AI, not the deterministic
+    # clarification.
+    assert response["reply"] == ai_manager.reply
+
+
+@pytest.mark.django_db
+def test_handle_text_message_dispatches_validationerror_to_ai_clarify(
+    business, client_profile, service,
+):
+    """Bug #1 dispatch fix: when the AI generation raises a tool-call
+    ValidationError (hallucinated id, past time, …), the bot must ask
+    the client to clarify — NOT promise a retry in 2 minutes.
+    """
+    ai_manager = StubAIManager(
+        reply="ignored",
+        raise_exception=ValidationError(
+            "Selected service is not available for this business."
+        ),
+    )
+
+    response = handle_text_message(
+        business_id=business.id,
+        channel=ConversationMessage.Channel.TELEGRAM,
+        client=client_profile,
+        text="Что-то совсем непонятное",
+        ai_manager=ai_manager,
+    )
+
+    assert response["escalated"] is False
+    reply_lower = response["reply"].lower()
+    assert "уточните" in reply_lower
+    # Must NOT be the "ai_retry" message.
+    assert "не получилось" not in reply_lower
+
+
+@pytest.mark.django_db
+def test_handle_text_message_keeps_ai_retry_for_generic_failure(
+    business, client_profile, service,
+):
+    """Network / SDK errors stay on the retry path — they ARE transient,
+    so suggesting a retry is the right UX.
+    """
+    ai_manager = StubAIManager(
+        reply="ignored",
+        raise_exception=RuntimeError("OpenAI 503"),
+    )
+
+    response = handle_text_message(
+        business_id=business.id,
+        channel=ConversationMessage.Channel.TELEGRAM,
+        client=client_profile,
+        text="Что-то совсем непонятное",
+        ai_manager=ai_manager,
+    )
+
+    reply_lower = response["reply"].lower()
+    assert "не получилось" in reply_lower
+    assert "пару минут" in reply_lower
 
 
 @pytest.mark.django_db

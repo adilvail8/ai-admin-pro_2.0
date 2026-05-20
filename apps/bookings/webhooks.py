@@ -57,6 +57,7 @@ from .replies import (
     build_reschedule_multiple_bookings_reply,
     build_reschedule_no_active_bookings_reply,
     build_reschedule_success_reply,
+    build_multi_haircut_clarification_reply,
     build_service_catalog_reply,
     build_service_master_options_reply,
     build_service_price_reply,
@@ -68,13 +69,16 @@ from .replies import (
     build_working_hours_reply,
 )
 from .service_matcher import (
+    business_has_multiple_haircut_services,
     detect_generic_haircut_request,
     get_gendered_haircut_services,
     get_service_recommended_masters,
     infer_service_from_messages,
+    is_generic_haircut_query,
     is_haircut_service,
 )
 from .intent import (
+    NON_BOOKING_SERVICE_QUESTION_KEYWORDS,
     detect_cancellation_request,
     detect_explicit_booking_intent,
     detect_gratitude_message,
@@ -1944,6 +1948,41 @@ def process_incoming_message(
         )
         return {"reply": reply, "escalated": False}
 
+    # Multi-haircut clarification short-circuit. Sultan-style barber
+    # shops with several haircut variants (фейд / мужская / детская /
+    # стрижка-борода / …) used to lose ~57% of AI calls because bare
+    # "стрижка" gave the LLM no service_id to pin on, and it would
+    # hallucinate one — triggering Service.DoesNotExist downstream and
+    # surfacing as the generic "ai_retry" reply. Catch the case here.
+    #
+    # Guard against generic "?" — detect_non_booking_service_question
+    # treats any text with "?" as a non-booking inquiry, which would
+    # also block the bug case ("Какой день свободен?"). Instead use the
+    # explicit keyword set: a question like "а во время стрижки можно
+    # …" stays with the AI; "хочу стрижку" / "на стрижку, какой день
+    # свободен?" gets the clarification.
+    text_looks_like_service_inquiry = any(
+        keyword in normalized_text.lower()
+        for keyword in NON_BOOKING_SERVICE_QUESTION_KEYWORDS
+    )
+    if (
+        inferred_service is None
+        and is_generic_haircut_query(normalized_text)
+        and business_has_multiple_haircut_services(business)
+        and not text_looks_like_service_inquiry
+    ):
+        reply = build_multi_haircut_clarification_reply(
+            business=business, language=preferred_language,
+        )
+        store_message(
+            business_id=business_id,
+            client=client,
+            channel=channel,
+            role=ConversationMessage.Role.ASSISTANT,
+            content=reply,
+        )
+        return {"reply": reply, "escalated": False}
+
     logger.info(
         "ai_fallback_entered",
         extra={
@@ -1962,6 +2001,30 @@ def process_incoming_message(
         reply = ai_manager.generate_reply(
             conversation_context
         )
+    except ValidationError as error:
+        # AI tool-call arrived with bad arguments (hallucinated id, past
+        # start_time, missing field, …). These are not transient — a
+        # retry won't help, and "ai_retry" is misleading UX. Ask the
+        # client to clarify and let the next message restart the flow.
+        logger.info(
+            "ai_tool_call_invalid",
+            extra={
+                "business_id": business_id,
+                "client_id": client.id,
+                "channel": channel,
+                "error": "; ".join(error.messages) if hasattr(error, "messages") else str(error),
+                "text": (normalized_text or "")[:120],
+            },
+        )
+        reply = get_localized_runtime_message("ai_clarify", preferred_language)
+        store_message(
+            business_id=business_id,
+            client=client,
+            channel=channel,
+            role=ConversationMessage.Role.ASSISTANT,
+            content=reply,
+        )
+        return {"reply": reply, "escalated": False}
     except Exception:
         logger.exception(
             "ai_reply_failed",
