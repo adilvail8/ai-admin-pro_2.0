@@ -157,6 +157,8 @@ def infer_service_from_messages(*, business: Business, texts: list[str]):
     service_aliases = {
         "Women's Haircut": ("женск", "әйел", "айел"),
         "Men's Haircut": ("мужск", "кроп", "barber"),
+        "Fade Haircut": ("фейд", "fade"),
+        "Kids Haircut": ("детск", "балалар", "детская стрижка"),
         "Haircut + Beard Combo": (
             "стрижка и борода",
             "стрижку и бороду",

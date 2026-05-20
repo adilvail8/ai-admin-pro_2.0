@@ -2,7 +2,7 @@ import logging
 import re
 from itertools import islice
 from types import SimpleNamespace
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
@@ -1014,6 +1014,47 @@ def process_incoming_message(
         for keyword in ("завтра", "ертең", "ертен")
     )
 
+    # Multi-haircut clarification short-circuit — must fire BEFORE the
+    # generic booking_intent_clarification below, because "стрижка
+    # завтра" hits both (intent keyword "завтра" + bare haircut), and
+    # the generic prompt would lose the haircut-specific list and the
+    # date context.
+    _text_looks_like_service_inquiry = any(
+        keyword in normalized_text.lower()
+        for keyword in NON_BOOKING_SERVICE_QUESTION_KEYWORDS
+    )
+    if (
+        inferred_service is None
+        and is_generic_haircut_query(normalized_text)
+        and business_has_multiple_haircut_services(business)
+        and not _text_looks_like_service_inquiry
+    ):
+        # Preserve the date the client mentioned on this turn ("стрижка
+        # завтра") so the next message ("фейд") can resume the slot
+        # search without re-asking the date. Only stamp a future date —
+        # a stale yesterday would never be valid.
+        if (
+            current_message_target_date is not None
+            and current_message_target_date >= timezone.localdate()
+        ):
+            session.context = {
+                **(session.context or {}),
+                "pending_target_date": current_message_target_date.isoformat(),
+            }
+            session.touch_expiration()
+            session.save()
+        reply = build_multi_haircut_clarification_reply(
+            business=business, language=preferred_language,
+        )
+        store_message(
+            business_id=business_id,
+            client=client,
+            channel=channel,
+            role=ConversationMessage.Role.ASSISTANT,
+            content=reply,
+        )
+        return {"reply": reply, "escalated": False}
+
     if (
         session.state == BookingSession.State.IDLE
         and booking is None
@@ -1261,7 +1302,26 @@ def process_incoming_message(
         and inferred_service is not None
         and not non_booking_service_question
     ):
-        if current_message_target_date is not None:
+        # If the previous turn was a multi-haircut clarification, the
+        # date the client gave back then ("стрижка завтра") was stashed
+        # as pending_target_date. Consume it here so the client doesn't
+        # have to repeat the date after picking the haircut variant.
+        pending_target_date = None
+        if (
+            isinstance(session.context, dict)
+            and session.context.get("pending_target_date")
+        ):
+            try:
+                candidate = date.fromisoformat(
+                    session.context["pending_target_date"],
+                )
+            except (TypeError, ValueError):
+                candidate = None
+            if candidate is not None and candidate >= timezone.localdate():
+                pending_target_date = candidate
+        effective_target_date = current_message_target_date or pending_target_date
+
+        if effective_target_date is not None:
             set_session_service(
                 session,
                 service=inferred_service,
@@ -1270,7 +1330,7 @@ def process_incoming_message(
             resolved_target_date, slots = find_next_available_slots(
                 business=business,
                 service=inferred_service,
-                target_date=current_message_target_date,
+                target_date=effective_target_date,
             )
             time_preference = extract_slot_time_preference(normalized_text)
             if time_preference is not None and time_preference.get("kind") == "later":
@@ -1965,41 +2025,6 @@ def process_incoming_message(
             service=session.service,
             slot=confirmation_slot,
             language=preferred_language,
-        )
-        store_message(
-            business_id=business_id,
-            client=client,
-            channel=channel,
-            role=ConversationMessage.Role.ASSISTANT,
-            content=reply,
-        )
-        return {"reply": reply, "escalated": False}
-
-    # Multi-haircut clarification short-circuit. Sultan-style barber
-    # shops with several haircut variants (фейд / мужская / детская /
-    # стрижка-борода / …) used to lose ~57% of AI calls because bare
-    # "стрижка" gave the LLM no service_id to pin on, and it would
-    # hallucinate one — triggering Service.DoesNotExist downstream and
-    # surfacing as the generic "ai_retry" reply. Catch the case here.
-    #
-    # Guard against generic "?" — detect_non_booking_service_question
-    # treats any text with "?" as a non-booking inquiry, which would
-    # also block the bug case ("Какой день свободен?"). Instead use the
-    # explicit keyword set: a question like "а во время стрижки можно
-    # …" stays with the AI; "хочу стрижку" / "на стрижку, какой день
-    # свободен?" gets the clarification.
-    text_looks_like_service_inquiry = any(
-        keyword in normalized_text.lower()
-        for keyword in NON_BOOKING_SERVICE_QUESTION_KEYWORDS
-    )
-    if (
-        inferred_service is None
-        and is_generic_haircut_query(normalized_text)
-        and business_has_multiple_haircut_services(business)
-        and not text_looks_like_service_inquiry
-    ):
-        reply = build_multi_haircut_clarification_reply(
-            business=business, language=preferred_language,
         )
         store_message(
             business_id=business_id,
