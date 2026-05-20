@@ -6739,6 +6739,165 @@ def test_multi_haircut_business_clarifies_bare_haircut_request(
 
 
 @pytest.mark.django_db
+def test_multi_haircut_clarify_stashes_pending_target_date(
+    business, client_profile, monkeypatch,
+):
+    """When the client mentions a date alongside an ambiguous "стрижка",
+    the date must survive the clarification step. Without this, the
+    next turn ("фейд") would slip into AWAITING_DATE and re-ask the
+    date the client already gave.
+    """
+    _make_multi_haircut_business(business)
+    fixed_today = date(2026, 5, 18)  # Monday
+    tomorrow = fixed_today + timedelta(days=1)
+    monkeypatch.setattr(timezone, "localdate", lambda: fixed_today)
+
+    ai_manager = StubAIManager(
+        reply="ignored",
+        raise_exception=AssertionError("AI must not be reached"),
+    )
+
+    response = handle_text_message(
+        business_id=business.id,
+        channel=ConversationMessage.Channel.TELEGRAM,
+        client=client_profile,
+        text="стрижка завтра",
+        ai_manager=ai_manager,
+    )
+
+    assert response["escalated"] is False
+    assert "какую" in response["reply"].lower()
+
+    session = BookingSession.objects.get(
+        business=business,
+        client=client_profile,
+        channel=ConversationMessage.Channel.TELEGRAM,
+    )
+    assert session.context.get("pending_target_date") == tomorrow.isoformat()
+
+
+@pytest.mark.django_db
+def test_multi_haircut_clarify_consumes_pending_target_date_next_turn(
+    business, client_profile, master, monkeypatch,
+):
+    """Two-turn flow: vague "стрижка завтра" → clarify; then "фейд" must
+    jump straight to slot options for tomorrow, no second date prompt.
+    """
+    _make_multi_haircut_business(business)
+    fixed_today = date(2026, 5, 18)  # Monday — master has hours all weekdays
+    monkeypatch.setattr(timezone, "localdate", lambda: fixed_today)
+
+    ai_manager = StubAIManager(
+        reply="ignored",
+        raise_exception=AssertionError("AI must not be reached"),
+    )
+
+    # Turn 1: ambiguous "стрижка" + date → multi-haircut clarification
+    handle_text_message(
+        business_id=business.id,
+        channel=ConversationMessage.Channel.TELEGRAM,
+        client=client_profile,
+        text="стрижка завтра",
+        ai_manager=ai_manager,
+    )
+
+    # Turn 2: client picks the variant — bot must use pending date.
+    response = handle_text_message(
+        business_id=business.id,
+        channel=ConversationMessage.Channel.TELEGRAM,
+        client=client_profile,
+        text="фейд",
+        ai_manager=ai_manager,
+    )
+
+    reply_lower = response["reply"].lower()
+    # Slot list cues — NOT a date-selection prompt.
+    assert (
+        "вариант" in reply_lower
+        or "удобн" in reply_lower
+        or ":" in response["reply"]
+    )
+    assert "на какой день" not in reply_lower
+    # Session moved past AWAITING_DATE.
+    session = BookingSession.objects.get(
+        business=business,
+        client=client_profile,
+        channel=ConversationMessage.Channel.TELEGRAM,
+    )
+    assert session.state in {
+        BookingSession.State.AWAITING_SLOT_CHOICE,
+        BookingSession.State.AWAITING_CONFIRMATION,
+    }
+
+
+@pytest.mark.django_db
+def test_multi_haircut_clarify_skips_pending_when_no_date(
+    business, client_profile,
+):
+    """Bare "стрижка" without a date must NOT stash a stale pending_target_date."""
+    _make_multi_haircut_business(business)
+    ai_manager = StubAIManager(
+        reply="ignored",
+        raise_exception=AssertionError("AI must not be reached"),
+    )
+
+    handle_text_message(
+        business_id=business.id,
+        channel=ConversationMessage.Channel.TELEGRAM,
+        client=client_profile,
+        text="стрижка",
+        ai_manager=ai_manager,
+    )
+
+    session = BookingSession.objects.get(
+        business=business,
+        client=client_profile,
+        channel=ConversationMessage.Channel.TELEGRAM,
+    )
+    assert "pending_target_date" not in (session.context or {})
+
+
+@pytest.mark.django_db
+def test_multi_haircut_clarify_ignores_stale_pending_target_date(
+    business, client_profile, master, monkeypatch,
+):
+    """If pending_target_date is in the past (e.g. session crossed
+    midnight), the bot must NOT silently book yesterday — fall through
+    to the regular AWAITING_DATE prompt instead.
+    """
+    _make_multi_haircut_business(business)
+    fixed_today = date(2026, 5, 18)  # Monday
+    monkeypatch.setattr(timezone, "localdate", lambda: fixed_today)
+
+    # Pre-stash a stale date directly into the session.
+    session = BookingSession.objects.create(
+        business=business,
+        client=client_profile,
+        channel=ConversationMessage.Channel.TELEGRAM,
+        state=BookingSession.State.IDLE,
+        context={"pending_target_date": (fixed_today - timedelta(days=1)).isoformat()},
+    )
+    session.touch_expiration()
+    session.save()
+
+    ai_manager = StubAIManager(
+        reply="ignored",
+        raise_exception=AssertionError("AI must not be reached"),
+    )
+
+    response = handle_text_message(
+        business_id=business.id,
+        channel=ConversationMessage.Channel.TELEGRAM,
+        client=client_profile,
+        text="фейд",
+        ai_manager=ai_manager,
+    )
+
+    # No silent booking on a past date — bot asks for a fresh date.
+    assert "на какой день" in response["reply"].lower()
+
+
+@pytest.mark.django_db
 def test_multi_haircut_short_circuit_skipped_for_service_inquiry(
     business, client_profile,
 ):
