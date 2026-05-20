@@ -536,6 +536,28 @@ def build_existing_booking_reply(*, booking: Booking, language: str) -> str:
     return f"Запись еще не подтверждена: «{service_name}», {local_start_label}, мастер {master_name}. Подтвердите?"
 
 
+def build_booking_status_reply(*, booking: Booking, language: str) -> str:
+    """Answer "когда я записан?" with a self-contained status line.
+
+    Distinct from ``build_existing_booking_reply`` (which colours its
+    wording by PENDING vs CONFIRMED). This reply is a flat status
+    statement plus a soft offer to reschedule/cancel — matches what a
+    client expects when they ask the bot for their next appointment.
+    """
+    local_start_label = format_local_datetime(booking.start_time, language=language)
+    service_name = localize_service_name(booking.service.name, language)
+    master_name = booking.master.full_name
+    if language == "kz":
+        return (
+            f"Сіз «{service_name}» қызметіне жаздыңыз: {local_start_label}, "
+            f"шебер {master_name}. Жылжыту немесе тоқтату қажет болса — жазыңыз!"
+        )
+    return (
+        f"Вы записаны на «{service_name}», {local_start_label}, "
+        f"мастер {master_name}. Если хотите перенести или отменить — напишите!"
+    )
+
+
 def build_service_catalog_reply(*, business: Business, language: str) -> str:
     services = list(
         business.services.filter(is_active=True)

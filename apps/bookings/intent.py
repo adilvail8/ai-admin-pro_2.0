@@ -380,6 +380,67 @@ def detect_explicit_booking_intent(text: str) -> bool:
     return any(keyword in normalized for keyword in BOOKING_INTENT_KEYWORDS)
 
 
+# Phrases the client uses to ask about an EXISTING booking, not to
+# create a new one. "хочу записаться" wins the guard so we don't
+# misroute someone who is actually trying to book.
+BOOKING_STATUS_INQUIRY_PHRASES = (
+    "на когда я записан",
+    "на когда записан",
+    "когда я записан",
+    "когда у меня запись",
+    "когда у меня записан",
+    "когда у меня бронь",
+    "когда запись",
+    "когда мой приём",
+    "когда мой прием",
+    "есть ли запись",
+    "есть запись",
+    "есть ли у меня запись",
+    "есть у меня запись",
+    "моя запись",
+    "я записан",
+    "записан ли я",
+    "записан ли",
+    "проверь запись",
+    "проверить запись",
+    "статус записи",
+    # Kazakh
+    "қашан жазылдым",
+    "менің жазбам",
+    "жазбам бар ма",
+    "жазылдым ба",
+)
+
+_BOOKING_STATUS_NEW_BOOKING_GUARDS = (
+    "хочу запис",
+    "хочу записаться",
+    "запиши меня",
+    "запишите меня",
+    "запишите на",
+    "запиши на",
+    "хочу на",
+    "новая запись",
+    "новую запись",
+    "жаз мені",
+)
+
+
+def detect_booking_status_inquiry(text: str) -> bool:
+    """True when the client asks about an existing booking, not to make one.
+
+    Used by ``process_incoming_message`` to short-circuit the AI
+    fallthrough — answering "когда я записан?" deterministically from
+    ``get_latest_active_booking`` is faster and more reliable than
+    letting the LLM stitch the answer together from history.
+    """
+    normalized = (text or "").strip().lower()
+    if not normalized:
+        return False
+    if any(guard in normalized for guard in _BOOKING_STATUS_NEW_BOOKING_GUARDS):
+        return False
+    return any(phrase in normalized for phrase in BOOKING_STATUS_INQUIRY_PHRASES)
+
+
 def detect_non_booking_service_question(text: str) -> bool:
     normalized = (text or "").strip().lower()
     if not normalized or detect_explicit_booking_intent(normalized):

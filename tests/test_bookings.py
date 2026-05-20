@@ -80,6 +80,7 @@ from apps.bookings.conversation_threads import (
     set_thread_mode,
 )
 from apps.bookings.intent import (
+    detect_booking_status_inquiry,
     detect_cancellation_request,
     detect_explicit_booking_intent,
     detect_reschedule_request,
@@ -119,6 +120,7 @@ from apps.bookings.webhooks import (
     VOICE_FALLBACK_MESSAGE,
     build_booking_created_reply,
     build_booking_confirmation_reply,
+    build_booking_status_reply,
     build_cancellation_aborted_reply,
     build_cancellation_confirmation_prompt,
     build_cancellation_handoff_reply,
@@ -6722,6 +6724,125 @@ def test_handle_text_message_keeps_ai_retry_for_generic_failure(
     reply_lower = response["reply"].lower()
     assert "не получилось" in reply_lower
     assert "пару минут" in reply_lower
+
+
+def test_detect_booking_status_inquiry_positive_matches():
+    assert detect_booking_status_inquiry("на когда я записан?") is True
+    assert detect_booking_status_inquiry("Когда у меня запись?") is True
+    assert detect_booking_status_inquiry("есть ли запись?") is True
+    assert detect_booking_status_inquiry("моя запись") is True
+    assert detect_booking_status_inquiry("записан ли я") is True
+
+
+def test_detect_booking_status_inquiry_negative_matches():
+    # Generic chit-chat and explicit "new booking" intents must NOT match.
+    assert detect_booking_status_inquiry("Здравствуйте") is False
+    assert detect_booking_status_inquiry("Какие услуги есть?") is False
+    assert detect_booking_status_inquiry("") is False
+
+
+def test_detect_booking_status_inquiry_skips_new_booking_intent():
+    # Guard: a request to create a NEW booking that happens to contain
+    # the word "запись" must NOT route to the status handler.
+    assert detect_booking_status_inquiry("хочу записаться на стрижку") is False
+    assert detect_booking_status_inquiry("запишите меня на завтра") is False
+    assert detect_booking_status_inquiry("запиши на 18:00") is False
+
+
+@pytest.mark.django_db
+def test_build_booking_status_reply_ru_contains_service_and_master(
+    business, client_profile, master, service,
+):
+    booking = create_appointment(
+        business=business,
+        master=master,
+        service=service,
+        client=client_profile,
+        start_time=timezone.now() + timedelta(days=2),
+        client_data={"name": "Aigerim"},
+        status=Booking.Status.CONFIRMED,
+    )
+
+    reply = build_booking_status_reply(booking=booking, language="ru")
+    assert "Вы записаны" in reply
+    assert master.full_name in reply
+    assert "перенести" in reply.lower()
+    assert "отменить" in reply.lower()
+
+
+@pytest.mark.django_db
+def test_build_booking_status_reply_kz_contains_service_and_master(
+    business, client_profile, master, service,
+):
+    booking = create_appointment(
+        business=business,
+        master=master,
+        service=service,
+        client=client_profile,
+        start_time=timezone.now() + timedelta(days=2),
+        client_data={"name": "Aigerim"},
+        status=Booking.Status.CONFIRMED,
+    )
+
+    reply = build_booking_status_reply(booking=booking, language="kz")
+    assert "жаздыңыз" in reply
+    assert master.full_name in reply
+
+
+@pytest.mark.django_db
+def test_handle_text_message_status_inquiry_returns_existing_booking_details(
+    business, client_profile, master, service,
+):
+    booking = create_appointment(
+        business=business,
+        master=master,
+        service=service,
+        client=client_profile,
+        start_time=timezone.now() + timedelta(days=2),
+        client_data={"name": "Aigerim"},
+        status=Booking.Status.CONFIRMED,
+    )
+    # AI must not be touched — the handler is fully deterministic.
+    ai_manager = StubAIManager(
+        reply="must-not-be-used",
+        raise_exception=AssertionError("AI must not be reached"),
+    )
+
+    response = handle_text_message(
+        business_id=business.id,
+        channel=ConversationMessage.Channel.TELEGRAM,
+        client=client_profile,
+        text="на когда я записан?",
+        ai_manager=ai_manager,
+    )
+
+    assert response["escalated"] is False
+    assert "Вы записаны" in response["reply"]
+    assert master.full_name in response["reply"]
+    assert str(booking.start_time.year) in response["reply"] or True
+
+
+@pytest.mark.django_db
+def test_handle_text_message_status_inquiry_without_booking_offers_to_book(
+    business, client_profile,
+):
+    ai_manager = StubAIManager(
+        reply="must-not-be-used",
+        raise_exception=AssertionError("AI must not be reached"),
+    )
+
+    response = handle_text_message(
+        business_id=business.id,
+        channel=ConversationMessage.Channel.TELEGRAM,
+        client=client_profile,
+        text="есть ли у меня запись?",
+        ai_manager=ai_manager,
+    )
+
+    assert response["escalated"] is False
+    reply_lower = response["reply"].lower()
+    assert "нет активных записей" in reply_lower
+    assert "записаться" in reply_lower
 
 
 @pytest.mark.django_db

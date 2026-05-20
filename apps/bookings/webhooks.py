@@ -57,6 +57,7 @@ from .replies import (
     build_reschedule_multiple_bookings_reply,
     build_reschedule_no_active_bookings_reply,
     build_reschedule_success_reply,
+    build_booking_status_reply,
     build_multi_haircut_clarification_reply,
     build_service_catalog_reply,
     build_service_master_options_reply,
@@ -79,6 +80,7 @@ from .service_matcher import (
 )
 from .intent import (
     NON_BOOKING_SERVICE_QUESTION_KEYWORDS,
+    detect_booking_status_inquiry,
     detect_cancellation_request,
     detect_explicit_booking_intent,
     detect_gratitude_message,
@@ -804,6 +806,31 @@ def process_incoming_message(
             channel=channel,
             language=preferred_language,
         )
+
+    # Booking status inquiry — "когда я записан?" / "есть ли запись?".
+    # Placed BEFORE detect_explicit_booking_intent / detect_greeting paths
+    # because "запись" is also a booking-intent keyword, which would
+    # otherwise hijack the status question into the new-booking
+    # clarification ("На какую услугу и на какой день записать?").
+    # Deterministic answer from get_latest_active_booking (which already
+    # includes NEEDS_ATTENTION and filters past entries via Fix 4).
+    if detect_booking_status_inquiry(normalized_text):
+        if booking is not None:
+            reply = build_booking_status_reply(
+                booking=booking, language=preferred_language,
+            )
+        else:
+            reply = get_localized_runtime_message(
+                "no_active_bookings_status", preferred_language,
+            )
+        store_message(
+            business_id=business_id,
+            client=client,
+            channel=channel,
+            role=ConversationMessage.Role.ASSISTANT,
+            content=reply,
+        )
+        return {"reply": reply, "escalated": False}
 
     if detect_greeting_message(normalized_text):
         clear_booking_session(session)
