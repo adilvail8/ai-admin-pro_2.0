@@ -16,7 +16,7 @@ app_name = "bookings"
 urlpatterns = [
     path("webhooks/messenger/", messenger_webhook, name="messenger_webhook"),
     path(
-        "webhooks/telegram/<str:secret>/",
+        "webhooks/telegram/<int:business_id>/<str:secret>/",
         telegram_webhook,
         name="telegram_webhook",
     ),

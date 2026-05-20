@@ -57,12 +57,88 @@ class Business(TimeStampedModel):
         help_text=_("Business-specific context for the AI assistant."),
     )
     timezone_name = models.CharField(max_length=64, default="Asia/Almaty")
+    cancellation_policy_hours = models.PositiveSmallIntegerField(
+        default=2,
+        help_text=_(
+            "Минимальный запас часов до начала записи, при котором клиент "
+            "может отменить её через бота. Если до записи остаётся меньше "
+            "этого порога — бот эскалирует запрос на администратора. "
+            "0 = разрешать отмену в любое время."
+        ),
+    )
     is_active = models.BooleanField(default=True)
+
+    green_api_instance_id = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text=_(
+            "Green-API instance id (idInstance). Используется для маршрутизации "
+            "входящих webhook'ов и отправки исходящих сообщений именно с этого "
+            "WhatsApp-аккаунта. Пусто = откатиться на глобальные GREEN_API_* "
+            "из env (deprecated)."
+        ),
+    )
+    green_api_api_token = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text=_(
+            "API-токен для Green-API instance. Plaintext в БД (тех-долг — "
+            "шифрование после деплоя)."
+        ),
+    )
+    green_api_api_url = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text=_(
+            "Опциональный override базового URL Green-API "
+            "(например, https://api.green-api.com). Пусто = settings.GREEN_API_URL."
+        ),
+    )
+
+    telegram_bot_token = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text=_(
+            "Per-business Telegram bot token (из BotFather). Используется "
+            "для отправки исходящих сообщений именно с этого бота. "
+            "Пусто = откатиться на глобальный settings.TELEGRAM_BOT_TOKEN "
+            "(deprecated). Plaintext в БД (тех-долг — шифрование вместе с "
+            "green_api_api_token после деплоя)."
+        ),
+    )
+    telegram_webhook_secret = models.CharField(
+        max_length=128,
+        blank=True,
+        default="",
+        help_text=_(
+            "Per-business secret для входящих Telegram webhook'ов. URL "
+            "/api/v1/webhooks/telegram/<business_id>/<secret>/ принимается "
+            "только если пара (id, secret) совпадает с этой записью. "
+            "Пусто = откатиться на settings.TELEGRAM_WEBHOOK_SECRET "
+            "(deprecated)."
+        ),
+    )
 
     class Meta:
         ordering = ("name",)
-        verbose_name = _("business")
-        verbose_name_plural = _("businesses")
+        verbose_name = _("Салон")
+        verbose_name_plural = _("Салоны")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("green_api_instance_id",),
+                condition=~models.Q(green_api_instance_id=""),
+                name="uniq_business_green_api_instance_id",
+            ),
+            models.UniqueConstraint(
+                fields=("telegram_webhook_secret",),
+                condition=~models.Q(telegram_webhook_secret=""),
+                name="uniq_business_telegram_webhook_secret",
+            ),
+        ]
 
     def __str__(self):
         return self.name
@@ -118,8 +194,8 @@ class Master(TimeStampedModel):
 
     class Meta:
         ordering = ("full_name",)
-        verbose_name = _("master")
-        verbose_name_plural = _("masters")
+        verbose_name = _("Мастер")
+        verbose_name_plural = _("Мастера")
         constraints = [
             models.UniqueConstraint(
                 fields=("business", "full_name"),
@@ -138,6 +214,65 @@ class Master(TimeStampedModel):
         )
 
 
+class MasterUnavailability(TimeStampedModel):
+    business = models.ForeignKey(
+        Business,
+        on_delete=models.CASCADE,
+        related_name="master_unavailabilities",
+    )
+    master = models.ForeignKey(
+        Master,
+        on_delete=models.CASCADE,
+        related_name="unavailabilities",
+    )
+    start_time = models.DateTimeField()
+    end_time = models.DateTimeField()
+    reason = models.CharField(max_length=255, blank=True, default="")
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ("start_time", "master__full_name")
+        verbose_name = _("Отсутствие мастера")
+        verbose_name_plural = _("Отсутствия мастеров")
+        indexes = [
+            models.Index(fields=("business", "start_time", "end_time")),
+            models.Index(fields=("master", "start_time", "end_time")),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(end_time__gt=F("start_time")),
+                name="master_unavailability_end_after_start",
+            ),
+        ]
+
+    def __str__(self):
+        local_start = timezone.localtime(self.start_time)
+        return f"{self.master.full_name} unavailable {local_start:%Y-%m-%d %H:%M}"
+
+    def clean(self):
+        super().clean()
+        if self.master_id and self.business_id != self.master.business_id:
+            raise ValidationError(
+                {"master": _("Master must belong to the selected business.")}
+            )
+        if self.start_time and timezone.is_naive(self.start_time):
+            raise ValidationError(
+                {"start_time": _("start_time must be timezone-aware.")}
+            )
+        if self.end_time and timezone.is_naive(self.end_time):
+            raise ValidationError(
+                {"end_time": _("end_time must be timezone-aware.")}
+            )
+        if self.start_time and self.end_time and self.end_time <= self.start_time:
+            raise ValidationError(
+                {"end_time": _("end_time must be after start_time.")}
+            )
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
 class Category(TimeStampedModel):
     business = models.ForeignKey(
         Business,
@@ -150,8 +285,8 @@ class Category(TimeStampedModel):
 
     class Meta:
         ordering = ("name",)
-        verbose_name = _("category")
-        verbose_name_plural = _("categories")
+        verbose_name = _("Категория")
+        verbose_name_plural = _("Категории")
         constraints = [
             models.UniqueConstraint(
                 fields=("business", "name"),
@@ -188,8 +323,8 @@ class Service(TimeStampedModel):
 
     class Meta:
         ordering = ("name",)
-        verbose_name = _("service")
-        verbose_name_plural = _("services")
+        verbose_name = _("Услуга")
+        verbose_name_plural = _("Услуги")
         constraints = [
             models.UniqueConstraint(
                 fields=("business", "name"),
@@ -229,11 +364,11 @@ class BookingQuerySet(models.QuerySet):
 
 class Booking(TimeStampedModel):
     class Status(models.TextChoices):
-        CONFIRMED = "confirmed", _("Confirmed")
-        PENDING = "pending", _("Pending")
-        CANCELLED = "cancelled", _("Cancelled")
-        NO_SHOW = "no_show", _("No show")
-        NEEDS_ATTENTION = "needs_attention", _("Needs attention")
+        CONFIRMED = "confirmed", _("Подтверждена")
+        PENDING = "pending", _("Ожидает")
+        CANCELLED = "cancelled", _("Отменена")
+        NO_SHOW = "no_show", _("Неявка")
+        NEEDS_ATTENTION = "needs_attention", _("Нужна проверка")
 
     business = models.ForeignKey(
         Business,
@@ -275,14 +410,15 @@ class Booking(TimeStampedModel):
     )
     follow_up_sent_at = models.DateTimeField(null=True, blank=True)
     reminder_sent_at = models.DateTimeField(null=True, blank=True)
+    day_reminder_sent_at = models.DateTimeField(null=True, blank=True)
     notes = models.TextField(blank=True)
 
     objects = BookingQuerySet.as_manager()
 
     class Meta:
         ordering = ("start_time",)
-        verbose_name = _("booking")
-        verbose_name_plural = _("bookings")
+        verbose_name = _("Бронирование")
+        verbose_name_plural = _("Бронирования")
         indexes = [
             models.Index(fields=("business", "start_time")),
             models.Index(fields=("master", "start_time", "status")),
@@ -322,6 +458,11 @@ class Booking(TimeStampedModel):
         if self.has_overlap():
             raise ValidationError(
                 _("Selected time slot overlaps with another booking.")
+            )
+
+        if self.has_master_unavailability_overlap():
+            raise ValidationError(
+                _("Selected time slot overlaps with master unavailability.")
             )
 
     def save(self, *args, **kwargs):
@@ -367,6 +508,11 @@ class Booking(TimeStampedModel):
         if self.has_overlap():
             raise ValidationError(
                 _("Selected time slot overlaps with another booking.")
+            )
+
+        if self.has_master_unavailability_overlap():
+            raise ValidationError(
+                _("Selected time slot overlaps with master unavailability.")
             )
 
     def sync_service_duration(self):
@@ -442,6 +588,21 @@ class Booking(TimeStampedModel):
             .exists()
         )
 
+    def has_master_unavailability_overlap(self):
+        if self.status == self.Status.CANCELLED:
+            return False
+
+        if not all([self.master_id, self.start_time, self.end_time]):
+            return False
+
+        return MasterUnavailability.objects.filter(
+            business=self.business,
+            master=self.master,
+            is_active=True,
+            start_time__lt=self.end_time,
+            end_time__gt=self.start_time,
+        ).exists()
+
     @property
     def total_slot_duration(self):
         return (
@@ -468,7 +629,7 @@ class Client(TimeStampedModel):
         related_name="clients",
     )
     name = models.CharField(max_length=100, blank=True)
-    phone = PhoneNumberField(region="KZ")
+    phone = PhoneNumberField(region="KZ", blank=True, null=True)
     external_id = models.CharField(max_length=100, blank=True)
     telegram_id = models.CharField(max_length=50, blank=True, null=True)
     whatsapp_id = models.CharField(max_length=50, blank=True, null=True)
@@ -478,8 +639,8 @@ class Client(TimeStampedModel):
 
     class Meta:
         ordering = ("name", "phone")
-        verbose_name = _("client")
-        verbose_name_plural = _("clients")
+        verbose_name = _("Клиент")
+        verbose_name_plural = _("Клиенты")
         constraints = [
             models.UniqueConstraint(
                 fields=("business", "phone"),
@@ -660,6 +821,8 @@ class AIInteractionLog(TimeStampedModel):
         default=Status.SUCCESS,
     )
     error_message = models.TextField(blank=True)
+    prompt_tokens = models.PositiveIntegerField(null=True, blank=True)
+    completion_tokens = models.PositiveIntegerField(null=True, blank=True)
 
     class Meta:
         ordering = ("-created_at",)
@@ -696,8 +859,8 @@ class ConversationMessage(TimeStampedModel):
 
     class Meta:
         ordering = ("created_at", "id")
-        verbose_name = _("conversation message")
-        verbose_name_plural = _("conversation messages")
+        verbose_name = _("Сообщение в диалоге")
+        verbose_name_plural = _("Сообщения в диалогах")
         indexes = [
             models.Index(fields=("business", "client", "channel", "created_at")),
         ]
@@ -734,3 +897,197 @@ class ConversationMessage(TimeStampedModel):
             cls.objects.filter(
                 id__in=stale_message_ids
             ).delete()
+
+
+class ConversationThread(TimeStampedModel):
+    class Mode(models.TextChoices):
+        BOT_ACTIVE = "bot_active", _("Bot active")
+        HUMAN_TAKEOVER = "human_takeover", _("Human takeover")
+        BOT_PAUSED_UNTIL = "bot_paused_until", _("Bot paused until")
+
+    business = models.ForeignKey(
+        Business,
+        on_delete=models.CASCADE,
+        related_name="conversation_threads",
+    )
+    client = models.ForeignKey(
+        Client,
+        on_delete=models.CASCADE,
+        related_name="conversation_threads",
+    )
+    channel = models.CharField(
+        max_length=20,
+        choices=ConversationMessage.Channel.choices,
+    )
+    mode = models.CharField(
+        max_length=32,
+        choices=Mode.choices,
+        default=Mode.BOT_ACTIVE,
+    )
+    bot_paused_until = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ("business_id", "client_id", "channel")
+        verbose_name = _("Диалог")
+        verbose_name_plural = _("Диалоги")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("business", "client", "channel"),
+                name="uniq_conversation_thread_per_client_channel",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=("business", "client", "channel", "mode"),
+                name="bookings_thread_mode_idx",
+            ),
+            models.Index(
+                fields=("bot_paused_until",),
+                name="bookings_thread_paused_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.business_id}:{self.client_id}:{self.channel}"
+            f" [{self.mode}]"
+        )
+
+    def clean(self):
+        super().clean()
+        if self.client_id and self.business_id != self.client.business_id:
+            raise ValidationError(
+                {"client": _("Client must belong to the same business.")}
+            )
+        if self.mode != self.Mode.BOT_PAUSED_UNTIL and self.bot_paused_until:
+            raise ValidationError(
+                {
+                    "bot_paused_until": _(
+                        "Paused-until timestamp is only valid for paused mode."
+                    )
+                }
+            )
+        if self.mode == self.Mode.BOT_PAUSED_UNTIL and not self.bot_paused_until:
+            raise ValidationError(
+                {"bot_paused_until": _("Paused mode requires a timestamp.")}
+            )
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
+
+class BookingSession(TimeStampedModel):
+    SESSION_TTL = timedelta(minutes=60)
+
+    class State(models.TextChoices):
+        IDLE = "idle", _("Idle")
+        AWAITING_DATE = "awaiting_date", _("Awaiting date")
+        AWAITING_SLOT_CHOICE = "awaiting_slot_choice", _("Awaiting slot choice")
+        AWAITING_CONFIRMATION = "awaiting_confirmation", _("Awaiting confirmation")
+        CANCEL_CHOOSING = "cancel_choosing", _("Cancellation: choosing booking")
+        CANCEL_CONFIRMING = "cancel_confirming", _("Cancellation: confirming booking")
+        RESCHEDULE_CHOOSING = "reschedule_choosing", _("Reschedule: choosing booking")
+
+    business = models.ForeignKey(
+        Business,
+        on_delete=models.CASCADE,
+        related_name="booking_sessions",
+    )
+    client = models.ForeignKey(
+        Client,
+        on_delete=models.CASCADE,
+        related_name="booking_sessions",
+    )
+    channel = models.CharField(
+        max_length=20,
+        choices=ConversationMessage.Channel.choices,
+    )
+    state = models.CharField(
+        max_length=32,
+        choices=State.choices,
+        default=State.IDLE,
+    )
+    service = models.ForeignKey(
+        Service,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="booking_sessions",
+    )
+    master = models.ForeignKey(
+        Master,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="booking_sessions",
+    )
+    target_date = models.DateField(null=True, blank=True)
+    selected_start_time = models.DateTimeField(null=True, blank=True)
+    selected_end_time = models.DateTimeField(null=True, blank=True)
+    slot_options = models.JSONField(default=list, blank=True)
+    context = models.JSONField(default=dict, blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ("business_id", "client_id", "channel")
+        verbose_name = _("Сессия бронирования")
+        verbose_name_plural = _("Сессии бронирования")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("business", "client", "channel"),
+                name="uniq_booking_session_per_client_channel",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=("expires_at",)),
+            models.Index(fields=("business", "client", "channel", "state")),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.business_id}:{self.client_id}:{self.channel}"
+            f" [{self.state}]"
+        )
+
+    @property
+    def is_expired(self):
+        return bool(self.expires_at and self.expires_at <= timezone.now())
+
+    def touch_expiration(self):
+        self.expires_at = timezone.now() + self.SESSION_TTL
+
+    def reset(self, *, keep_expiration: bool = False):
+        self.state = self.State.IDLE
+        self.service = None
+        self.master = None
+        self.target_date = None
+        self.selected_start_time = None
+        self.selected_end_time = None
+        self.slot_options = []
+        self.context = {}
+        if not keep_expiration:
+            self.touch_expiration()
+        return self
+
+    def clean(self):
+        super().clean()
+        if self.client_id and self.business_id != self.client.business_id:
+            raise ValidationError(
+                {"client": _("Client must belong to the same business.")}
+            )
+        if self.service_id and self.business_id != self.service.business_id:
+            raise ValidationError(
+                {"service": _("Service must belong to the same business.")}
+            )
+        if self.master_id and self.business_id != self.master.business_id:
+            raise ValidationError(
+                {"master": _("Master must belong to the same business.")}
+            )
+
+    def save(self, *args, **kwargs):
+        if self.expires_at is None:
+            self.touch_expiration()
+        self.full_clean()
+        return super().save(*args, **kwargs)

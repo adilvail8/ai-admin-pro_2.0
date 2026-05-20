@@ -25,6 +25,7 @@ env = environ.Env(
     CORS_ALLOWED_ORIGINS=(list, []),
     CELERY_TASK_ALWAYS_EAGER=(bool, False),
     GREEN_API_ALLOWED_IPS=(list, []),
+    GREEN_API_BUSINESS_IDS=(list, []),
     DB_PORT=(int, 5432),
     DB_CONN_MAX_AGE=(int, 60),
 )
@@ -40,6 +41,9 @@ CORS_ALLOW_CREDENTIALS = env.bool("CORS_ALLOW_CREDENTIALS", default=True)
 CORS_URLS_REGEX = r"^/api/.*$"
 
 INSTALLED_APPS = [
+    "unfold",
+    "unfold.contrib.filters",
+    "unfold.contrib.forms",
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -63,6 +67,10 @@ MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
+    # LocaleMiddleware must sit after SessionMiddleware so admin's built-in
+    # strings ("Select action", "Add %(name)s", "Save", etc.) get translated
+    # through Django's bundled ru locale instead of falling back to English.
+    "django.middleware.locale.LocaleMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
@@ -121,6 +129,122 @@ MEDIA_ROOT = BASE_DIR / "media"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 ADMIN_URL_PATH = env("ADMIN_URL_PATH", default="secure-admin/")
 
+UNFOLD = {
+    "SITE_TITLE": "AI Admin Pro",
+    "SITE_HEADER": "AI Admin Pro",
+    "SITE_SYMBOL": "monitoring",
+    "SHOW_HISTORY": True,
+    "SHOW_VIEW_ON_SITE": False,
+    "COLORS": {
+        "primary": {
+            "50": "250 245 255",
+            "100": "243 232 255",
+            "200": "233 213 255",
+            "300": "216 180 254",
+            "400": "192 132 252",
+            "500": "168 85 247",
+            "600": "147 51 234",
+            "700": "126 34 206",
+            "800": "107 33 168",
+            "900": "88 28 135",
+            "950": "59 7 100",
+        },
+    },
+    "SIDEBAR": {
+        "show_search": True,
+        "show_all_applications": False,
+        "navigation": [
+            {
+                "title": "Записи",
+                "icon": "calendar_month",
+                "items": [
+                    {
+                        "title": "Бронирования",
+                        "icon": "event",
+                        "link": f"/{ADMIN_URL_PATH}bookings/booking/",
+                        "badge": "apps.bookings.admin.booking_needs_attention_count",
+                    },
+                    {
+                        "title": "Клиенты",
+                        "icon": "people",
+                        "link": f"/{ADMIN_URL_PATH}bookings/client/",
+                    },
+                ],
+            },
+            {
+                "title": "Коммуникации",
+                "icon": "chat",
+                "items": [
+                    {
+                        "title": "Исходящие сообщения",
+                        "icon": "send",
+                        "link": f"/{ADMIN_URL_PATH}bookings/outboundmessage/",
+                        "badge": "apps.bookings.admin.failed_messages_count",
+                    },
+                    {
+                        "title": "Входящие события",
+                        "icon": "inbox",
+                        "link": f"/{ADMIN_URL_PATH}bookings/inboundevent/",
+                    },
+                ],
+            },
+            {
+                "title": "Справочники",
+                "icon": "settings",
+                "items": [
+                    {
+                        "title": "Бизнесы",
+                        "icon": "store",
+                        "link": f"/{ADMIN_URL_PATH}bookings/business/",
+                    },
+                    {
+                        "title": "Мастера",
+                        "icon": "person",
+                        "link": f"/{ADMIN_URL_PATH}bookings/master/",
+                    },
+                    {
+                        "title": "Услуги",
+                        "icon": "spa",
+                        "link": f"/{ADMIN_URL_PATH}bookings/service/",
+                    },
+                    {
+                        "title": "Категории",
+                        "icon": "category",
+                        "link": f"/{ADMIN_URL_PATH}bookings/category/",
+                    },
+                ],
+            },
+            {
+                "title": "Система",
+                "icon": "admin_panel_settings",
+                "items": [
+                    {
+                        "title": "Аудит",
+                        "icon": "history",
+                        "link": f"/{ADMIN_URL_PATH}bookings/auditlog/",
+                    },
+                    {
+                        "title": "AI Логи",
+                        "icon": "psychology",
+                        "link": f"/{ADMIN_URL_PATH}bookings/aiinteractionlog/",
+                    },
+                    {
+                        "title": "Пользователи",
+                        "icon": "manage_accounts",
+                        "link": f"/{ADMIN_URL_PATH}auth/user/",
+                    },
+                ],
+            },
+        ],
+    },
+    "DASHBOARD_CALLBACK": "apps.bookings.admin.dashboard_callback",
+}
+UNFOLD["SITE_TITLE"] = "apps.bookings.admin.canonical_site_title_callback"
+UNFOLD["SITE_HEADER"] = "apps.bookings.admin.site_header_callback"
+UNFOLD["SITE_SUBHEADER"] = "apps.bookings.admin.canonical_site_subheader_callback"
+UNFOLD["SIDEBAR"]["navigation"] = "apps.bookings.admin.canonical_sidebar_navigation"
+UNFOLD["STYLES"] = ["apps.bookings.admin.owner_admin_styles"]
+
 CELERY_BROKER_URL = env(
     "CELERY_BROKER_URL",
     default="redis://localhost:6379/0",
@@ -168,6 +292,7 @@ TELEGRAM_WEBHOOK_SECRET = env("TELEGRAM_WEBHOOK_SECRET", default="")
 TELEGRAM_BOT_TOKEN = env("TELEGRAM_BOT_TOKEN", default="")
 GREEN_API_SHARED_SECRET = env("GREEN_API_SHARED_SECRET", default="")
 GREEN_API_ALLOWED_IPS = env("GREEN_API_ALLOWED_IPS")
+GREEN_API_BUSINESS_IDS = [int(value) for value in env("GREEN_API_BUSINESS_IDS")]
 GREEN_API_URL = env("GREEN_API_URL", default="")
 GREEN_API_INSTANCE_ID = env("GREEN_API_INSTANCE_ID", default="")
 GREEN_API_API_TOKEN = env("GREEN_API_API_TOKEN", default="")

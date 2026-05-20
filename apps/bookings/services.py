@@ -7,7 +7,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from .audit import create_audit_log
-from .models import Booking, Business, Client
+from .models import Booking, Business, Client, MasterUnavailability
 
 
 DEFAULT_SLOT_STEP = timedelta(minutes=30)
@@ -79,6 +79,7 @@ def validate_business_booking_rules(*, business, master, service):
         if str(item).isdigit()
     }
     blocked_pairs = ai_rules.get("blocked_master_service_pairs", [])
+    allowed_pairs = ai_rules.get("allowed_master_service_pairs", [])
 
     if service.id in blocked_service_ids:
         raise ValidationError("This service is blocked by business rules.")
@@ -94,6 +95,16 @@ def validate_business_booking_rules(*, business, master, service):
             raise ValidationError(
                 "This master cannot be booked for the selected service."
             )
+
+    normalized_allowed_pairs = {
+        (pair.get("master_id"), pair.get("service_id"))
+        for pair in allowed_pairs
+        if isinstance(pair, dict)
+    }
+    if normalized_allowed_pairs and (master.id, service.id) not in normalized_allowed_pairs:
+        raise ValidationError(
+            "This master cannot be booked for the selected service."
+        )
 
 
 def iter_master_slots(
@@ -150,7 +161,16 @@ def get_available_slots(
 ):
     if not business.is_active:
         raise ValidationError("Business is inactive.")
-    service = business.services.get(pk=service_id, is_active=True)
+    try:
+        service = business.services.get(pk=service_id, is_active=True)
+    except business.services.model.DoesNotExist as error:
+        # AI sometimes hallucinates a service_id when the user is vague
+        # (e.g. bare "стрижка" at a multi-haircut salon). Convert the
+        # ORM DoesNotExist into a ValidationError so it round-trips back
+        # to the model as a tool error instead of a hard exception.
+        raise ValidationError(
+            "Selected service is not available for this business."
+        ) from error
     validate_service_level_business_rules(business=business, service=service)
 
     business_tz = get_business_timezone(business)
@@ -194,6 +214,15 @@ def get_available_slots(
             )
             .values("start_time", "end_time")
         )
+        unavailabilities = list(
+            MasterUnavailability.objects.filter(
+                business=business,
+                master=master,
+                is_active=True,
+                start_time__lt=day_end,
+                end_time__gt=day_start,
+            ).values("start_time", "end_time")
+        )
         for slot in iter_master_slots(
             master=master,
             target_date=target_date,
@@ -203,8 +232,11 @@ def get_available_slots(
         ):
             if is_today_in_business_timezone and slot.start < local_now:
                 continue
-            if not slot_overlaps(slot, bookings):
-                available_slots.append(slot)
+            if slot_overlaps(slot, bookings):
+                continue
+            if slot_overlaps(slot, unavailabilities):
+                continue
+            available_slots.append(slot)
 
     return sorted(
         available_slots,
@@ -339,6 +371,23 @@ def reschedule_appointment(
     if not getattr(target_master, "is_active", False):
         raise ValidationError("Master is inactive.")
 
+    # Defense in depth: Booking.save() will also call validate_domain_constraints
+    # which checks overlap, but checking here gives a clearer error message and
+    # protects the service contract from any future change to Booking.save()
+    # that might skip slot sync.
+    target_duration = locked_booking.total_slot_duration
+    target_end_time = start_time + target_duration
+    overlap_exists = (
+        Booking.objects.active()
+        .filter(master=target_master)
+        .overlaps(start_time, target_end_time)
+        .exclude(pk=locked_booking.pk)
+        .exists()
+    )
+    if overlap_exists:
+        raise ValidationError("Selected time slot is already taken.")
+
+    previous_start_time = locked_booking.start_time
     locked_booking.master = business.masters.select_for_update().get(
         pk=target_master.pk,
         is_active=True,
@@ -355,6 +404,7 @@ def reschedule_appointment(
         payload={
             "master_id": locked_booking.master_id,
             "status": locked_booking.status,
+            "previous_start_time": previous_start_time.isoformat(),
             "start_time": locked_booking.start_time.isoformat(),
             "end_time": locked_booking.end_time.isoformat(),
         },
@@ -391,6 +441,53 @@ def update_booking_status(
         },
     )
     return locked_booking
+
+
+@transaction.atomic
+def cancel_booking_for_client(
+    *,
+    booking: Booking,
+    client: Client,
+    business: Business,
+) -> Booking:
+    """Cancel a booking on behalf of the client who owns it.
+
+    Used by the bot when a client says "отмени запись" and the booking is
+    far enough in the future per ``Business.cancellation_policy_hours``.
+    Re-validates ownership and scope before mutating state, then defers
+    the operator-notification side effect to ``notify_human_operator``
+    so the owner sees the freed slot.
+
+    Raises ``ValidationError`` if the booking does not belong to the
+    given client/business pair — protects against confused-deputy and
+    multi-business leaks.
+    """
+    if booking.client_id != client.id:
+        raise ValidationError("Booking does not belong to this client.")
+    validate_booking_business_scope(booking=booking, business=business)
+
+    cancelled = update_booking_status(
+        booking=booking,
+        business=business,
+        status=Booking.Status.CANCELLED,
+    )
+
+    # Inform the operator about the freed slot. Use Celery if available so
+    # the webhook response stays snappy; fall back to eager when CI/dev
+    # mode forces it.
+    from django.conf import settings as _settings
+
+    from .tasks import notify_human_operator
+
+    reason = "Booking cancelled by client via bot"
+    if _settings.CELERY_TASK_ALWAYS_EAGER:
+        notify_human_operator.apply(
+            kwargs={"booking_id": cancelled.id, "reason": reason}
+        ).get()
+    else:
+        notify_human_operator.delay(booking_id=cancelled.id, reason=reason)
+
+    return cancelled
 
 
 OPENAI_FUNCTION_DEFINITIONS = [
@@ -502,20 +599,40 @@ def execute_ai_function(
 
     if function_name == "create_appointment":
         business = Business.objects.get(pk=payload["business_id"], is_active=True)
+        # Defensive lookups: AI tool-calls occasionally arrive with stale
+        # or hallucinated ids — translate ORM DoesNotExist into a
+        # ValidationError so the tool returns a structured error to the
+        # LLM (which can retry with a different selection) instead of
+        # blowing up as a hard exception.
+        try:
+            master = business.masters.get(
+                pk=payload["master_id"], is_active=True,
+            )
+        except business.masters.model.DoesNotExist as error:
+            raise ValidationError(
+                "Selected master is not available for this business."
+            ) from error
+        try:
+            service = business.services.get(
+                pk=payload["service_id"], is_active=True,
+            )
+        except business.services.model.DoesNotExist as error:
+            raise ValidationError(
+                "Selected service is not available for this business."
+            ) from error
+        try:
+            client_obj = business.clients.get(
+                pk=payload["client_id"], is_active=True,
+            )
+        except business.clients.model.DoesNotExist as error:
+            raise ValidationError(
+                "Selected client is not available for this business."
+            ) from error
         booking = create_appointment(
             business=business,
-            master=business.masters.get(
-                pk=payload["master_id"],
-                is_active=True,
-            ),
-            service=business.services.get(
-                pk=payload["service_id"],
-                is_active=True,
-            ),
-            client=business.clients.get(
-                pk=payload["client_id"],
-                is_active=True,
-            ),
+            master=master,
+            service=service,
+            client=client_obj,
             start_time=datetime.fromisoformat(payload["start_time"]),
             client_data=payload["client_data"],
         )
