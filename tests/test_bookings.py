@@ -4789,6 +4789,95 @@ def test_extract_slot_time_preference_understands_morning_phrase():
     assert preference["end"] == (12, 0)
 
 
+def test_extract_slot_time_preference_lunch_window():
+    # Sultan-style "в обед" must land on 12-14, distinct from generic
+    # "днём" (12-17).
+    for phrase in (
+        "в обед есть время?",
+        "обед",
+        "к обеду удобно",
+        "полдень устроит",
+        "обеденное время",
+    ):
+        preference = extract_slot_time_preference(phrase)
+        assert preference is not None, phrase
+        assert preference["kind"] == "range", phrase
+        assert preference["start"] == (12, 0), phrase
+        assert preference["end"] == (14, 0), phrase
+        assert preference["label_ru"] == "в обед", phrase
+
+
+def test_extract_slot_time_preference_before_lunch_window():
+    for phrase in ("до обеда хочу", "перед обедом"):
+        preference = extract_slot_time_preference(phrase)
+        assert preference is not None, phrase
+        assert preference["kind"] == "range", phrase
+        assert preference["start"] == (10, 0), phrase
+        assert preference["end"] == (12, 0), phrase
+        assert preference["label_ru"] == "до обеда", phrase
+
+
+def test_extract_slot_time_preference_late_evening_is_narrower_than_evening():
+    for phrase in (
+        "поздно вечером",
+        "поздним вечером",
+        "под вечер",
+        "ближе к закрытию",
+    ):
+        preference = extract_slot_time_preference(phrase)
+        assert preference is not None, phrase
+        assert preference["kind"] == "range", phrase
+        assert preference["start"] == (19, 0), phrase
+        assert preference["end"] == (21, 0), phrase
+        assert preference["label_ru"] == "поздно вечером", phrase
+
+
+def test_extract_slot_time_preference_evening_aliases():
+    for phrase in ("к вечеру", "вечерком", "ближе к вечеру"):
+        preference = extract_slot_time_preference(phrase)
+        assert preference is not None, phrase
+        assert preference["kind"] == "range", phrase
+        assert preference["start"] == (17, 0), phrase
+        assert preference["end"] == (21, 0), phrase
+        assert preference["label_ru"] == "вечером", phrase
+
+
+def test_extract_slot_time_preference_morning_aliases():
+    for phrase in ("поутру можно", "пораньше бы", "к утру хочу"):
+        preference = extract_slot_time_preference(phrase)
+        assert preference is not None, phrase
+        assert preference["kind"] == "range", phrase
+        assert preference["start"] == (8, 0), phrase
+        assert preference["end"] == (12, 0), phrase
+
+
+def test_extract_slot_time_preference_after_lunch_still_lands_on_daytime():
+    # Regression: "после обеда" must keep the existing 12-17 mapping
+    # and NOT fall into the new narrower 12-14 lunch window.
+    preference = extract_slot_time_preference("после обеда удобно")
+    assert preference is not None
+    assert preference["kind"] == "range"
+    assert preference["start"] == (12, 0)
+    assert preference["end"] == (17, 0)
+    assert preference["label_ru"] == "днем"
+
+
+def test_extract_slot_time_preference_evening_phrases_regression():
+    # Regression: existing single-word evening triggers unchanged.
+    for phrase in ("вечером", "вечер"):
+        preference = extract_slot_time_preference(phrase)
+        assert preference is not None
+        assert preference["start"] == (17, 0)
+        assert preference["end"] == (21, 0)
+
+
+def test_extract_slot_time_preference_lunch_word_boundary_guard():
+    # Bare "необеденное" / similar must not falsely trigger lunch.
+    # (\b regex protects against the substring match.)
+    preference = extract_slot_time_preference("необеденное")
+    assert preference is None or preference.get("label_ru") != "в обед"
+
+
 @pytest.mark.django_db
 def test_handle_text_message_uses_weekday_date_in_active_date_step(
     business,

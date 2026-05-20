@@ -91,7 +91,31 @@ def extract_slot_time_preference(text: str):
             "minute": minute,
         }
 
-    if any(keyword in normalized for keyword in ("вечером", "вечер", "кешке", "кеш")):
+    # "Поздно вечером" — узкое окно 19-21. ДОЛЖНО проверяться ДО общего
+    # вечера, иначе "поздно вечером" поймает вечер 17-21 и потеряет
+    # семантику "ближе к закрытию".
+    if any(
+        keyword in normalized
+        for keyword in (
+            "поздно вечером", "поздним вечером", "под вечер",
+            "ближе к закрытию", "кеш кешке",
+        )
+    ):
+        return {
+            "kind": "range",
+            "start": (19, 0),
+            "end": (21, 0),
+            "label_ru": "поздно вечером",
+            "label_kz": "кеш кешке",
+        }
+
+    if any(
+        keyword in normalized
+        for keyword in (
+            "вечером", "вечер", "к вечеру", "вечерком", "ближе к вечеру",
+            "кешке", "кеш",
+        )
+    ):
         return {
             "kind": "range",
             "start": (17, 0),
@@ -107,7 +131,13 @@ def extract_slot_time_preference(text: str):
             "label_kz": "кейінірек",
         }
 
-    if any(keyword in normalized for keyword in ("утром", "с утра", "к утру", "танертен", "таңертең")):
+    if any(
+        keyword in normalized
+        for keyword in (
+            "утром", "с утра", "к утру", "поутру", "пораньше",
+            "танертен", "таңертең", "ертемен", "таңмен",
+        )
+    ):
         return {
             "kind": "range",
             "start": (8, 0),
@@ -126,6 +156,33 @@ def extract_slot_time_preference(text: str):
             "end": (17, 0),
             "label_ru": "днем",
             "label_kz": "түстен кейін",
+        }
+
+    # "До обеда" — 10-12. Проверяется ПОСЛЕ блока "день" (где сидит
+    # "после обеда"), но ДО блока "обед": иначе "до обеда" заматчится
+    # на голое "обед".
+    if any(
+        keyword in normalized
+        for keyword in ("до обеда", "перед обедом", "түскі асқа дейін")
+    ):
+        return {
+            "kind": "range",
+            "start": (10, 0),
+            "end": (12, 0),
+            "label_ru": "до обеда",
+            "label_kz": "түскі асқа дейін",
+        }
+
+    # "Обед" / "полдень" — узкое окно 12-14. \b-граница защищает от
+    # "необеденное" / случайных вхождений. "до обеда" / "после обеда" /
+    # "перед обедом" уже отработали в блоках выше — сюда они не дойдут.
+    if re.search(r"\b(обед\w*|полдень|полудн\w*|түс\w*)", normalized):
+        return {
+            "kind": "range",
+            "start": (12, 0),
+            "end": (14, 0),
+            "label_ru": "в обед",
+            "label_kz": "түс мезгілінде",
         }
 
     after_match = re.search(r"(?:после|кейін|кейин)\s*(\d{1,2})(?::?(\d{2}))?", time_text)
