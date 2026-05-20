@@ -475,8 +475,14 @@ def build_booking_confirmation_reply(*, service, slot, language: str) -> str:
 def build_date_selection_reply(*, service, language: str) -> str:
     service_name = localize_service_name(service.name, language)
     if language == "kz":
-        return f"{service_name} қызметіне жазуға болады. Ертеңге қарайық па, әлде басқа күн керек пе?"
-    return f"Ок, {service_name}. На завтра смотрим или нужен другой день?"
+        return (
+            f"{service_name} қызметіне жазамыз. Қай күнге жазайын? "
+            "Мысалы: ертең, сәрсенбі немесе 25 мамыр."
+        )
+    return (
+        f"Ок, {service_name}. На какой день записать? "
+        "Например: завтра, среда или 25 мая."
+    )
 
 
 def build_booking_created_reply(*, service_name: str, local_start: datetime, master_name: str, language: str) -> str:

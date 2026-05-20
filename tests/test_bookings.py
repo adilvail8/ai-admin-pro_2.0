@@ -81,6 +81,7 @@ from apps.bookings.conversation_threads import (
 )
 from apps.bookings.intent import (
     detect_cancellation_request,
+    detect_explicit_booking_intent,
     detect_reschedule_request,
 )
 from apps.bookings.normalizers import normalize_telegram_payload
@@ -5480,6 +5481,55 @@ def test_build_date_selection_reply_uses_localized_service_name_for_beard_trim(b
 
     assert "стрижка бороды" in reply
     assert "Beard Trim" not in reply
+
+
+@pytest.mark.django_db
+def test_build_date_selection_reply_is_open_question_ru(business):
+    service = Service.objects.create(
+        business=business,
+        category=Category.objects.create(business=business, name="Barber"),
+        name="Fade Haircut",
+        price=Decimal("5000.00"),
+        duration=timedelta(minutes=30),
+        is_active=True,
+    )
+    reply = build_date_selection_reply(service=service, language="ru")
+    # Open question, not a "tomorrow?" suggestion.
+    assert "На какой день записать" in reply
+    assert "На завтра смотрим" not in reply
+
+
+@pytest.mark.django_db
+def test_build_date_selection_reply_is_open_question_kz(business):
+    service = Service.objects.create(
+        business=business,
+        category=Category.objects.create(business=business, name="Barber"),
+        name="Fade Haircut",
+        price=Decimal("5000.00"),
+        duration=timedelta(minutes=30),
+        is_active=True,
+    )
+    reply = build_date_selection_reply(service=service, language="kz")
+    assert "Қай күнге жазайын" in reply
+    assert "Ертеңге қарайық" not in reply
+
+
+def test_detect_explicit_booking_intent_skips_open_schedule_questions():
+    # These are open-ended schedule inquiries, not commitments — they
+    # used to falsely trigger the booking flow via "свободн" / "окно".
+    assert detect_explicit_booking_intent("какой день свободен?") is False
+    assert detect_explicit_booking_intent("есть окно?") is False
+    assert detect_explicit_booking_intent("когда есть окно?") is False
+
+
+def test_detect_explicit_booking_intent_keeps_concrete_signals():
+    # Regression: concrete booking phrasing must still register.
+    assert detect_explicit_booking_intent("запишите на завтра") is True
+    assert detect_explicit_booking_intent("хочу на сегодня") is True
+    assert detect_explicit_booking_intent("давайте на послезавтра") is True
+    # "свободно завтра в 18:00?" — concrete because "завтра" remains a
+    # booking-intent keyword even though "свободн" was removed.
+    assert detect_explicit_booking_intent("свободно завтра в 18:00?") is True
 
 
 @pytest.mark.django_db
