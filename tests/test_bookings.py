@@ -7834,6 +7834,75 @@ def test_download_telegram_voice_returns_none_without_bot_token(
     ) is None
 
 
+def test_verify_green_api_request_accepts_any_token_with_empty_secret():
+    """Developer-tier Green-API doesn't forward a shared secret. With
+    the placeholder/empty secret in settings, any token (or none) must
+    pass — the IP allowlist becomes the actual perimeter.
+    """
+    from apps.bookings.security import verify_green_api_request
+
+    with override_settings(GREEN_API_SHARED_SECRET="", GREEN_API_ALLOWED_IPS=[]):
+        # No exception means the token check was bypassed.
+        verify_green_api_request(token="", authorization="", remote_addr="1.2.3.4")
+        verify_green_api_request(
+            token="anything", authorization="", remote_addr="1.2.3.4",
+        )
+
+
+def test_verify_green_api_request_accepts_any_token_with_default_secret():
+    """The placeholder default 'green-api-secret' from .env.example is
+    treated the same as empty — pre-deployment salons stay reachable
+    until they upgrade and set a real secret.
+    """
+    from apps.bookings.security import verify_green_api_request
+
+    with override_settings(
+        GREEN_API_SHARED_SECRET="green-api-secret", GREEN_API_ALLOWED_IPS=[],
+    ):
+        verify_green_api_request(token="", authorization="", remote_addr="1.2.3.4")
+
+
+def test_verify_green_api_request_enforces_real_secret():
+    """Regression: once the deployment sets a non-placeholder secret,
+    the token check is back on.
+    """
+    from apps.bookings.security import verify_green_api_request
+
+    with override_settings(
+        GREEN_API_SHARED_SECRET="real-production-secret-9f8e",
+        GREEN_API_ALLOWED_IPS=[],
+    ):
+        # Correct token passes.
+        verify_green_api_request(
+            token="real-production-secret-9f8e",
+            authorization="",
+            remote_addr="1.2.3.4",
+        )
+        # Wrong token rejected.
+        with pytest.raises(ValidationError):
+            verify_green_api_request(
+                token="wrong-token", authorization="", remote_addr="1.2.3.4",
+            )
+
+
+def test_verify_green_api_request_keeps_ip_allowlist_with_placeholder_secret():
+    """Even when token check is skipped, the IP allowlist still gates.
+    Developer-tier deployments rely on this as their only perimeter.
+    """
+    from apps.bookings.security import verify_green_api_request
+
+    with override_settings(
+        GREEN_API_SHARED_SECRET="", GREEN_API_ALLOWED_IPS=["10.0.0.1"],
+    ):
+        # Allowed IP — passes.
+        verify_green_api_request(token="", authorization="", remote_addr="10.0.0.1")
+        # Disallowed IP — rejected.
+        with pytest.raises(ValidationError):
+            verify_green_api_request(
+                token="", authorization="", remote_addr="8.8.8.8",
+            )
+
+
 @pytest.mark.django_db
 @override_settings(
     GREEN_API_SHARED_SECRET="green-secret",

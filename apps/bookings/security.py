@@ -85,6 +85,9 @@ def verify_telegram_request(*, business_id: int, secret: str):
     raise ValidationError("Invalid Telegram webhook secret.")
 
 
+GREEN_API_PLACEHOLDER_SECRETS = {"", "green-api-secret", "change-me"}
+
+
 def verify_green_api_request(
     *,
     token: str,
@@ -99,7 +102,15 @@ def verify_green_api_request(
         else:
             candidate_token = normalized_authorization
 
-    if candidate_token != settings.GREEN_API_SHARED_SECRET:
+    # Green-API Developer tier doesn't forward a shared secret in the
+    # webhook headers. Skip the token check whenever the deployment is
+    # still on the placeholder secret (empty / default), but always keep
+    # the IP-allowlist guard below — that's the actual perimeter on the
+    # Developer tier. Upgrading to a paid Green-API tier and setting a
+    # real GREEN_API_SHARED_SECRET re-enables the token check.
+    configured_secret = (settings.GREEN_API_SHARED_SECRET or "").strip()
+    secret_is_placeholder = configured_secret in GREEN_API_PLACEHOLDER_SECRETS
+    if not secret_is_placeholder and candidate_token != configured_secret:
         raise ValidationError("Invalid Green-API signature.")
     if settings.GREEN_API_ALLOWED_IPS and remote_addr not in settings.GREEN_API_ALLOWED_IPS:
         raise ValidationError("Green-API IP is not allowed.")
