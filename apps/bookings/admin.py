@@ -445,6 +445,17 @@ def get_clean_sidebar_navigation(request):
                         "icon": "manage_accounts",
                         "link": reverse("admin:auth_user_changelist"),
                     },
+                    {
+                        # Quick "+" entry — Unfold's sidebar doesn't render a
+                        # per-item add button (single <a> tag per item), so we
+                        # surface "Add user" as its own row right after the
+                        # changelist. Superadmin-only — owner sidebar lives in
+                        # the other branch and has no Система group at all.
+                        "title": "Добавить пользователя",
+                        "icon": "person_add",
+                        "link": reverse("admin:auth_user_add"),
+                        "preserve_title": True,
+                    },
                 ],
             },
         ]

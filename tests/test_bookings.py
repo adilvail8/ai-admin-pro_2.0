@@ -9711,6 +9711,61 @@ def test_superuser_keeps_full_integrator_sidebar_and_title():
 
 
 @pytest.mark.django_db
+def test_superuser_sidebar_has_add_user_quick_action():
+    """Superadmin sees the "Add user" shortcut right after the user
+    changelist link — Unfold's sidebar doesn't render a per-item "+"
+    button, so the add view is exposed as its own row.
+    """
+    from django.urls import reverse
+
+    request = APIRequestFactory().get("/secure-admin/")
+    request.user = User.objects.create_superuser(
+        username="superadmin_add_user",
+        password="StrongPass123!",
+        email="superadmin_add_user@example.com",
+    )
+
+    navigation = canonical_sidebar_navigation(request)
+    system_group = next(
+        group for group in navigation
+        if group["title"] == "Система"
+    )
+    item_titles = [item["title"] for item in system_group["items"]]
+    assert "Добавить пользователя" in item_titles
+    # Right after "Пользователи".
+    users_index = item_titles.index("Пользователи")
+    assert item_titles[users_index + 1] == "Добавить пользователя"
+
+    add_item = next(
+        item for item in system_group["items"]
+        if item["title"] == "Добавить пользователя"
+    )
+    assert add_item["link"] == reverse("admin:auth_user_add")
+    assert add_item["icon"] == "person_add"
+
+
+@pytest.mark.django_db
+def test_owner_sidebar_does_not_expose_user_admin(
+    owner_user, business_membership,
+):
+    """Owner must not see User admin entries — neither the changelist
+    nor the new "Add user" shortcut. Owner sidebar has no Система group
+    at all, so the assertion is defensive against future regressions.
+    """
+    request = APIRequestFactory().get("/secure-admin/")
+    request.user = owner_user
+
+    navigation = canonical_sidebar_navigation(request)
+    all_titles = [
+        item["title"]
+        for group in navigation
+        for item in group["items"]
+    ]
+    assert "Пользователи" not in all_titles
+    assert "Добавить пользователя" not in all_titles
+
+
+@pytest.mark.django_db
 def test_owner_gets_salon_scoped_sidebar_and_branding(
     owner_user,
     business_membership,
